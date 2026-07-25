@@ -2,7 +2,7 @@
 
 App interno para conferência diária de estoque cruzando vendas de marketplace (Mercado Livre e Shopee) com o saldo do ERP (Tiny), pensado pro fluxo real de separação de pedidos de uma operação de autopeças.
 
- **Status:** em construção — ajustado conforme o uso real do time mostra o que precisa melhorar.
+ **Status:** em construção: ajustado conforme o uso real do time mostra o que precisa melhorar.
 
 ## O problema
 
