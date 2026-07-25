@@ -1,4 +1,4 @@
-# Conferência de Estoque & Reposição: AJ Bengoa
+# Conferência de Estoque e Reposição: AJ Bengoa
 
 App interno para conferência diária de estoque cruzando vendas de marketplace (Mercado Livre e Shopee) com o saldo do ERP (Tiny), pensado pro fluxo real de separação de pedidos de uma operação de autopeças.
 
