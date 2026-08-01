@@ -1,0 +1,2605 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Estoque — Conferência e Reposição</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script type="module">
+
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import {
+    getFirestore, collection, doc, setDoc, getDoc, onSnapshot,
+    getDocs, writeBatch, serverTimestamp, deleteDoc
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBIhVGy6fsHtcsuVFDPXHnOiYwmS6Gjodo",
+    authDomain: "estoque-conferencia.firebaseapp.com",
+    projectId: "estoque-conferencia",
+    storageBucket: "estoque-conferencia.firebasestorage.app",
+    messagingSenderId: "945955514565",
+    appId: "1:945955514565:web:de7c964e3e5e0157c6a8ac"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const itemsCol = collection(db, "sessions", "current", "items");
+  const sessionDocRef = doc(db, "sessions", "current");
+  const historyCol = collection(db, "sessions", "current", "history");
+
+  function itemDocId(sku, suffix){
+    const base = String(sku||"").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_") || "ITEM";
+    return suffix ? `${base}__${suffix}` : base;
+  }
+
+  window.FB = {
+    itemDocId,
+    async publishSession(items, threshold){
+      const existing = await getDocs(itemsCol);
+      const batch = writeBatch(db);
+      existing.forEach(d => batch.delete(d.ref));
+      items.forEach(it => {
+        const id = itemDocId(it.sku, it._docSuffix);
+        batch.set(doc(itemsCol, id), it);
+      });
+      batch.set(sessionDocRef, { threshold: threshold||1, updatedAt: serverTimestamp() }, {merge:true});
+      await batch.commit();
+    },
+    async updateItem(item){
+      const id = itemDocId(item.sku, item._docSuffix);
+      await setDoc(doc(itemsCol, id), item, {merge:true});
+    },
+    async deleteItem(docId){
+      await deleteDoc(doc(itemsCol, docId));
+    },
+    async setThreshold(threshold){
+      await setDoc(sessionDocRef, { threshold: threshold||1, updatedAt: serverTimestamp() }, {merge:true});
+    },
+    async clearSession(){
+      const existing = await getDocs(itemsCol);
+      const batch = writeBatch(db);
+      existing.forEach(d => {
+        const data = d.data();
+        if(!data.isOutrosDias) batch.delete(d.ref);
+      });
+      await batch.commit();
+    },
+    subscribe(onItems, onMeta){
+      onSnapshot(itemsCol, snap => {
+        const items = [];
+        snap.forEach(d => items.push(d.data()));
+        onItems(items);
+      });
+      onSnapshot(sessionDocRef, snap => {
+        if(snap.exists()) onMeta(snap.data());
+      });
+    },
+    async saveKits(kitsObj){
+      await setDoc(sessionDocRef, { kits: kitsObj || {}, updatedAt: serverTimestamp() }, {merge:true});
+    },
+    async loadKits(){
+      const snap = await getDoc(sessionDocRef);
+      return snap.exists() ? (snap.data().kits || {}) : {};
+    },
+    async archiveSession(items){
+      if(!items || !items.length) return;
+      const dateStr = new Date().toISOString().slice(0,10);
+      const ref = doc(historyCol);
+      await setDoc(ref, { date: dateStr, archivedAt: serverTimestamp(), items });
+    },
+    async loadHistory(){
+      const snap = await getDocs(historyCol);
+      const out = [];
+      snap.forEach(d => out.push(Object.assign({id:d.id}, d.data())));
+      return out;
+    },
+    async deleteHistoryByMonth(monthPrefix){
+      const snap = await getDocs(historyCol);
+      const batch = writeBatch(db);
+      let count = 0;
+      snap.forEach(d => {
+        const data = d.data();
+        if(data.date && data.date.startsWith(monthPrefix)){
+          batch.delete(d.ref);
+          count++;
+        }
+      });
+      if(count) await batch.commit();
+      return count;
+    },
+    async deleteAllHistory(){
+      const snap = await getDocs(historyCol);
+      const batch = writeBatch(db);
+      snap.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  };
+  window.dispatchEvent(new Event("fb-ready"));
+
+  // Composição de kits fica disponível globalmente
+  window.KITS = {bySku:{}, byDesc:{}};
+  onSnapshot(sessionDocRef, snap => {
+    const data = snap.exists() ? snap.data() : {};
+    window.KITS = data.kits || {bySku:{}, byDesc:{}};
+    window.dispatchEvent(new Event("kits-updated"));
+  });
+
+</script>
+<style>
+
+  :root{
+    --steel-100:#EEF2F8; --steel-200:#DCE4F0; --steel-700:#44546E;
+    --ink:#071B4A; --card:#FFFFFF; --line:#D6DEEC;
+    --blue:#0B5FA8; --blue-dark:#084A85;
+    --amber:#B89A00; --amber-bg:#FFF7CC;
+    --orange:#C2560A;
+    --red:#B23A2E; --red-bg:#FBE5E1;
+    --green:#2F7A4D; --green-bg:#E4F3E9;
+    --gray:#5C6660; --gray-bg:#E7EBE8;
+    --gold:#DED703;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{background:var(--steel-100); color:var(--ink); font-family:'IBM Plex Sans',sans-serif; -webkit-tap-highlight-color:transparent; padding-bottom:60px;}
+  .brand-stripe{height:4px; background:linear-gradient(90deg, var(--blue), var(--gold)); position:sticky; top:0; z-index:21;}
+  h1,h2,h3{font-family:'Archivo',sans-serif; margin:0;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+
+  header.topbar{background:var(--ink); color:#fff; padding:16px 16px 20px; position:sticky; top:0; z-index:20;}
+  header.topbar .row{display:flex; align-items:center; justify-content:space-between; gap:12px;}
+  header.topbar h1{font-size:18px; letter-spacing:.2px;}
+  header.topbar .sub{font-size:11px; color:#B9C2BB; margin-top:2px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.08em;}
+
+  .gauge-wrap{display:flex; align-items:center; gap:10px;}
+  .gauge{width:52px; height:52px; position:relative;}
+  .gauge svg{transform:rotate(-90deg);}
+  .gauge .pct{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600; color:#fff;}
+
+  main{max-width:720px; margin:0 auto; padding:14px;}
+
+  .steps{display:flex; gap:6px; margin:10px 0 16px;}
+  .step-pill{flex:1; text-align:center; padding:8px 4px; border-radius:999px; font-family:'IBM Plex Mono',monospace; font-size:10.5px; letter-spacing:.04em; background:var(--steel-200); color:var(--steel-700); border:1px solid transparent; text-transform:uppercase;}
+  .step-pill.active{background:var(--blue); color:#fff;}
+  .step-pill.done{background:var(--green-bg); color:var(--green); border-color:var(--green);}
+
+  .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:14px;}
+  .card h2{font-size:15px; margin-bottom:4px;}
+  .card .hint{font-size:12.5px; color:#5C6660; margin-bottom:12px; line-height:1.45;}
+
+  .dropzone{border:2px dashed var(--line); border-radius:var(--radius); padding:26px 14px; text-align:center; cursor:pointer; background:var(--steel-100); transition:.15s;}
+  .dropzone.drag{border-color:var(--blue); background:#EAF0FA;}
+  .dropzone.filled{border-color:var(--green); background:var(--green-bg);}
+  .dropzone .icon{font-size:26px; margin-bottom:6px;}
+  .dropzone .txt{font-size:13px; color:var(--steel-700);}
+  .dropzone .txt b{color:var(--ink);}
+  input[type=file]{display:none;}
+
+  .field{margin-bottom:12px;}
+  .field label{display:block; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--steel-700); margin-bottom:5px; font-family:'IBM Plex Mono',monospace;}
+  select, input[type=text], input[type=number]{width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:8px; font-size:14px; font-family:'IBM Plex Sans',sans-serif; background:#fff; color:var(--ink);}
+  select:focus, input:focus{outline:2px solid var(--blue); outline-offset:1px;}
+
+  .map-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .btn{display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:11px 16px; border-radius:8px; border:none; font-size:13.5px; font-weight:600; cursor:pointer; font-family:'IBM Plex Sans',sans-serif;}
+  .btn-primary{background:var(--blue); color:#fff;}
+  .btn-primary:active{background:var(--blue-dark);}
+  .btn-primary:disabled{opacity:.4; cursor:not-allowed;}
+  .btn-ghost{background:var(--steel-200); color:var(--ink);}
+  .btn-danger{background:var(--red-bg); color:var(--red);}
+  .btn-block{width:100%;}
+  .btn:disabled{opacity:.45; cursor:not-allowed;}
+
+  .toolbar{display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;}
+  .toolbar input[type=text]{flex:1; min-width:140px;}
+  .filter-chip{padding:8px 12px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#fff; color:var(--steel-700); cursor:pointer; font-family:'IBM Plex Mono',monospace; white-space:nowrap;}
+  .filter-chip.active{background:var(--ink); color:#fff; border-color:var(--ink);}
+
+  .summary-row{display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;}
+  .summary-box{flex:1; min-width:70px; border-radius:8px; padding:10px 6px; text-align:center;}
+  .summary-box .num{font-family:'IBM Plex Mono',monospace; font-size:20px; font-weight:600; display:block;}
+  .summary-box .lbl{font-size:9.5px; text-transform:uppercase; letter-spacing:.04em;}
+  .sb-green{background:var(--green-bg); color:var(--green);}
+  .sb-amber{background:var(--amber-bg); color:var(--amber);}
+  .sb-red{background:var(--red-bg); color:var(--red);}
+  .sb-pending{background:var(--steel-200); color:var(--steel-700);}
+  .sb-gray{background:var(--gray-bg); color:var(--gray);}
+
+  .item{border:1px solid var(--line); border-left-width:5px; border-radius:8px; padding:11px 12px; margin-bottom:9px; background:#fff;}
+  .item.st-ok{border-left-color:var(--green);}
+  .item.st-crit{border-left-color:var(--red);}
+  .item.st-warn{border-left-color:var(--amber);}
+  .item.st-pending{border-left-color:var(--line);}
+  .item.st-extra{border-left-color:var(--blue);}
+  .item.st-nomatch{border-left-color:var(--gray);}
+  .item.st-naotem{border-left-color:var(--red); background:var(--red-bg);}
+  .pedidos-alert{color:var(--orange); text-transform:uppercase; font-weight:700; letter-spacing:.02em;}
+  .pedido-group{border:2px solid var(--blue); border-radius:12px; padding:10px 10px 2px; margin-bottom:12px; background:rgba(11,95,168,0.05);}
+  .pedido-group .item{margin-bottom:8px;}
+  .pedido-group-header{font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--blue-dark); margin:0 2px 8px; letter-spacing:.02em;}
+  .novos-pedidos-header{font-family:'IBM Plex Mono',monospace; font-size:12.5px; font-weight:700; color:var(--ink); text-transform:uppercase; letter-spacing:.03em; margin:4px 2px 8px;}
+
+  .item-top{display:flex; justify-content:space-between; align-items:flex-start; gap:8px;}
+  .item-photo{width:44px; height:44px; border-radius:8px; object-fit:cover; border:1px solid var(--line); background:var(--steel-100); flex-shrink:0;}
+  .item-top-main{display:flex; gap:10px; align-items:flex-start;}
+  .item-sku{font-family:'IBM Plex Mono',monospace; font-size:12.5px; font-weight:600; color:var(--ink);}
+  .item-desc{font-size:12.5px; color:#5C6660; margin-top:2px; line-height:1.3;}
+  .item-badge{font-family:'IBM Plex Mono',monospace; font-size:10px; padding:3px 7px; border-radius:5px; white-space:nowrap; text-transform:uppercase; letter-spacing:.03em; font-weight:600;}
+  .badge-ok{background:var(--green-bg); color:var(--green);}
+  .badge-crit{background:var(--red-bg); color:var(--red);}
+  .badge-warn{background:var(--amber-bg); color:var(--amber);}
+  .badge-pending{background:var(--steel-200); color:var(--steel-700);}
+  .badge-extra{background:#E4EBF8; color:var(--blue);}
+  .badge-nomatch{background:var(--gray-bg); color:var(--gray);}
+
+  .item-body{display:flex; align-items:center; justify-content:space-between; margin-top:10px; gap:10px; flex-wrap:wrap;}
+  .sys-saldo{font-size:12px; color:var(--steel-700); line-height:1.5;}
+  .sys-saldo b{color:var(--ink); font-family:'IBM Plex Mono',monospace;}
+  .counter{display:flex; align-items:center; gap:8px;}
+  .counter-label{font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--steel-700); font-family:'IBM Plex Mono',monospace; margin-bottom:4px;}
+  .counter button{width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--steel-100); font-size:18px; font-weight:600; color:var(--ink); cursor:pointer;}
+  .counter button:active{background:var(--steel-200);}
+  .counter input{width:52px; text-align:center; padding:6px 2px; font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:15px; border:1px solid var(--line); border-radius:8px;}
+  .item-diff{margin-top:8px; font-size:12px; text-align:right; font-family:'IBM Plex Mono',monospace;}
+  .disp-row{display:flex; justify-content:space-between; align-items:flex-start; gap:10px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; background:#fff;}
+  .disp-row .disp-main{font-size:13px;}
+  .disp-row .disp-main b{color:var(--ink);}
+  .disp-row .disp-date{font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--steel-700); white-space:nowrap; background:var(--steel-200); padding:4px 8px; border-radius:999px;}
+  .disp-row-alert{border-color:var(--red); background:var(--red-bg);}
+  .disp-date-alert{background:var(--red)!important; color:#fff!important;}
+  .hbar-row{margin-bottom:10px;}
+  .hbar-row .hbar-label{display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px; gap:8px;}
+  .hbar-row .hbar-label .n{white-space:nowrap; font-family:'IBM Plex Mono',monospace; font-weight:600; color:var(--ink);}
+  .hbar-track{background:var(--steel-200); border-radius:6px; height:10px; overflow:hidden;}
+  .hbar-fill{height:100%; border-radius:6px; background:var(--blue);}
+  .hbar-fill.warn{background:#C0554A;}
+
+  .fab-bar{position:fixed; bottom:0; left:0; right:0; background:#fff; border-top:1px solid var(--line); padding:10px 14px; display:flex; gap:8px; z-index:30;}
+  .fab-bar .btn{flex:1;}
+
+  .empty{text-align:center; padding:26px 10px; color:#7A857E; font-size:13px;}
+  details.adv summary{cursor:pointer; font-size:12px; color:var(--blue); font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px;}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .small-note{font-size:11px; color:#84908A; margin-top:6px;}
+  .hidden{display:none !important;}
+
+
+  :root{
+    --steel-100:#EEF2F8; --steel-200:#DCE4F0; --steel-700:#44546E;
+    --ink:#071B4A; --card:#FFFFFF; --line:#D6DEEC;
+    --blue:#0B5FA8; --blue-dark:#084A85;
+    --amber:#B89A00; --amber-bg:#FFF7CC;
+    --orange:#C2560A;
+    --red:#B23A2E; --red-bg:#FBE5E1;
+    --green:#2F7A4D; --green-bg:#E4F3E9;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{background:var(--steel-100); color:var(--ink); font-family:'IBM Plex Sans',sans-serif; padding-bottom:20px;}
+  h1,h2,h3{font-family:'Archivo',sans-serif; margin:0;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+
+  header.topbar{background:var(--ink); color:#fff; padding:16px; position:sticky; top:0; z-index:20;}
+  header.topbar h1{font-size:17px;}
+  header.topbar .sub{font-size:11px; color:#B9C2BB; margin-top:2px; font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.06em;}
+
+  main{max-width:760px; margin:0 auto; padding:14px;}
+
+  .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin-bottom:14px;}
+  .card h2{font-size:15px; margin-bottom:4px;}
+  .card .hint{font-size:12.5px; color:#5C6660; margin-bottom:12px; line-height:1.45;}
+
+  .two-col{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  @media (max-width:560px){ .two-col{grid-template-columns:1fr;} }
+
+  .dropzone{border:2px dashed var(--line); border-radius:var(--radius); padding:20px 10px; text-align:center; cursor:pointer; background:var(--steel-100);}
+  .dropzone.filled{border-color:var(--green); background:var(--green-bg);}
+  .dropzone.drag{border-color:var(--blue); background:#EAF0FA;}
+  .dropzone .icon{font-size:22px; margin-bottom:4px;}
+  .dropzone .txt{font-size:12.5px; color:var(--steel-700);}
+  .dropzone .txt b{color:var(--ink);}
+  input[type=file]{display:none;}
+
+  .field{margin-bottom:12px;}
+  .field label{display:block; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--steel-700); margin-bottom:5px; font-family:'IBM Plex Mono',monospace;}
+  select, input[type=text], input[type=number]{
+    width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px;
+    font-size:13.5px; font-family:'IBM Plex Sans',sans-serif; background:#fff; color:var(--ink);
+  }
+  select:focus, input:focus{outline:2px solid var(--blue); outline-offset:1px;}
+
+  .btn{display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:11px 16px; border-radius:8px; border:none; font-size:13.5px; font-weight:600; cursor:pointer; font-family:'IBM Plex Sans',sans-serif;}
+  .btn-primary{background:var(--blue); color:#fff;}
+  .btn-primary:disabled{opacity:.4; cursor:not-allowed;}
+  .btn-ghost{background:var(--steel-200); color:var(--ink);}
+  .btn-block{width:100%;}
+
+  .small-note{font-size:11px; color:#84908A; margin-top:6px;}
+
+  .toolbar{display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:center;}
+  .toolbar input[type=text]{flex:1; min-width:140px;}
+  .filter-chip{padding:8px 12px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#fff; color:var(--steel-700); cursor:pointer; font-family:'IBM Plex Mono',monospace; white-space:nowrap;}
+  .filter-chip.active{background:var(--ink); color:#fff; border-color:var(--ink);}
+
+  .summary-row{display:flex; gap:8px; margin-bottom:14px;}
+  .summary-box{flex:1; border-radius:8px; padding:10px 8px; text-align:center;}
+  .summary-box .num{font-family:'IBM Plex Mono',monospace; font-size:20px; font-weight:600; display:block;}
+  .summary-box .lbl{font-size:10px; text-transform:uppercase; letter-spacing:.05em;}
+  .sb-green{background:var(--green-bg); color:var(--green);}
+  .sb-amber{background:var(--amber-bg); color:var(--amber);}
+  .sb-red{background:var(--red-bg); color:var(--red);}
+  .sb-neutral{background:var(--steel-200); color:var(--steel-700);}
+
+  table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  thead th{
+    text-align:left; font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.04em; color:var(--steel-700); padding:8px 8px; border-bottom:2px solid var(--line);
+    position:sticky; top:0; background:var(--card);
+  }
+  tbody td{padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:middle;}
+  tbody tr:last-child td{border-bottom:none;}
+  .sku-cell{font-family:'IBM Plex Mono',monospace; font-weight:600;}
+  .desc-cell{color:#5C6660; font-size:12px;}
+  .num-cell{font-family:'IBM Plex Mono',monospace; text-align:right;}
+  .status-pill{
+    font-family:'IBM Plex Mono',monospace; font-size:10px; padding:3px 8px; border-radius:5px;
+    text-transform:uppercase; letter-spacing:.03em; font-weight:600; white-space:nowrap; display:inline-block;
+  }
+  .st-crit{background:var(--red-bg); color:var(--red);}
+  .st-warn{background:var(--amber-bg); color:var(--amber);}
+  .st-ok{background:var(--green-bg); color:var(--green);}
+  .st-nosale{background:var(--steel-200); color:var(--steel-700);}
+
+  .table-wrap{overflow-x:auto; max-height:70vh; overflow-y:auto; border:1px solid var(--line); border-radius:8px;}
+
+  .empty{text-align:center; padding:26px 10px; color:#7A857E; font-size:13px;}
+  .hidden{display:none !important;}
+  details.adv summary{cursor:pointer; font-size:12px; color:var(--blue); font-family:'IBM Plex Mono',monospace; text-transform:uppercase; letter-spacing:.04em; margin-bottom:10px;}
+
+
+  .tabnav{ display:flex; gap:6px; padding:10px 14px 0; background:var(--ink); }
+  .tabnav button{
+    flex:1; padding:10px 6px; border:none; border-radius:8px 8px 0 0;
+    font-family:'IBM Plex Mono',monospace; font-size:11.5px; text-transform:uppercase;
+    letter-spacing:.04em; cursor:pointer; background:#0C2657; color:#9FB3D6;
+  }
+  .tabnav button.active{ background:var(--steel-100); color:var(--ink); font-weight:600; }
+  .tool-panel{ display:block; }
+  .tool-panel.hidden{ display:none; }
+
+</style>
+</head>
+<body>
+
+<div class="brand-stripe"></div>
+<div class="tabnav">
+  <button id="tabBtnConf" class="active">📋 Conferência de Estoque</button>
+  <button id="tabBtnHist">🗂️ Histórico</button>
+</div>
+
+<div id="tab-conf" class="tool-panel">
+<header class="topbar">
+  <div class="row">
+    <div style="display:flex; align-items:center; gap:10px;">
+      <img src="data:image/png;base64,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" alt="AJ Bengoa" style="width:40px; height:40px; border-radius:8px; flex-shrink:0;">
+      <div>
+        <h1>Conferência de Estoque</h1>
+        <div class="sub" id="subLabel">nenhuma contagem em andamento</div>
+      </div>
+    </div>
+    <div class="gauge-wrap">
+      <div class="gauge">
+        <svg width="52" height="52" viewBox="0 0 52 52">
+          <circle cx="26" cy="26" r="22" fill="none" stroke="#173B7A" stroke-width="5"/>
+          <circle id="gaugeArc" cx="26" cy="26" r="22" fill="none" stroke="#2F7A4D" stroke-width="5"
+            stroke-dasharray="138.2" stroke-dashoffset="138.2" stroke-linecap="round"/>
+        </svg>
+        <div class="pct" id="gaugePct">–</div>
+      </div>
+    </div>
+  </div>
+</header>
+<main>
+
+
+  <div class="steps">
+    <div class="step-pill" id="pill1">1 · Pedidos+Tiny</div>
+    <div class="step-pill" id="pill2">2 · Contagem ML</div>
+    <div class="step-pill" id="pill3">3 · Contagem Shopee</div>
+    <div class="step-pill" id="pill4">4 · Divergências</div>
+    <div class="step-pill" id="pill5">5 · Reposição</div>
+    <div class="step-pill" id="pill6">6 · Relatório</div>
+  </div>
+
+  <!-- STEP 1: IMPORT -->
+  <section id="step1">
+
+    <div class="card" id="cardKits">
+      <h2>0. Composição de Kits (produtos vendidos em par)</h2>
+      <div class="hint">Se um SKU vendido é na verdade um "kit" (ex: par de faróis) que consome estoque de 2 ou mais SKUs individuais no Tiny, cadastre aqui a composição uma vez. O app vai usar isso pra descontar certinho de cada componente sempre que aquele SKU do kit aparecer nos pedidos do dia.</div>
+
+      <div class="small-note" id="kitsStatusText">Carregando composição de kits salva…</div>
+
+      <div class="dropzone" id="dzKits" style="margin-top:10px;">
+        <div class="icon">🧩</div>
+        <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX de composição de kits</div>
+        <input type="file" id="fileKits" accept=".csv,.xlsx,.xls">
+      </div>
+
+      <div id="mapKitsArea" class="hidden" style="margin-top:16px;">
+        <div class="field">
+          <label>Coluna de SKU do Kit / Par</label>
+          <select id="mapKitSkuPar"></select>
+        </div>
+        <div class="field" style="margin-top:10px;">
+          <label>Coluna de Descrição do Kit (opcional, ajuda a cruzar quando o SKU do kit vier diferente no pedido)</label>
+          <select id="mapKitDescPar"></select>
+        </div>
+        <div class="map-grid">
+          <div class="field">
+            <label>Coluna de SKU do Componente</label>
+            <select id="mapKitSkuComp"></select>
+          </div>
+          <div class="field">
+            <label>Coluna de Quantidade por kit (opcional)</label>
+            <select id="mapKitQtd"></select>
+          </div>
+        </div>
+        <div class="field" style="margin-top:10px;">
+          <label>Coluna de Descrição do Componente (opcional)</label>
+          <select id="mapKitCompDesc"></select>
+        </div>
+        <div class="small-note" id="previewNoteKits"></div>
+        <div class="small-note">Se o mesmo SKU de kit aparecer em várias linhas (vários componentes), o app junta tudo automaticamente. Salvar aqui substitui a composição salva anteriormente.</div>
+        <button class="btn btn-primary btn-block" id="confirmKits" style="margin-top:10px;">Salvar composição de kits</button>
+      </div>
+
+      <button class="btn btn-ghost btn-block" id="btnClearKits" style="margin-top:10px;">🗑️ Apagar composição de kits salva</button>
+    </div>
+
+    <div class="card" id="cardTiny">
+      <h2>1. Importar saldo do Tiny</h2>
+      <div class="hint">O relatório de saldo em estoque (Tiny) é o mesmo pra Mercado Livre e Shopee — importa aqui uma vez só. Vou cruzar cada produto vendido hoje com o saldo dele, primeiro pelo SKU e, se não encontrar, pela descrição.</div>
+
+      <div class="dropzone" id="dzTiny">
+        <div class="icon">📄</div>
+        <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX exportado do Tiny</div>
+        <input type="file" id="fileTiny" accept=".csv,.xlsx,.xls">
+      </div>
+
+      <div id="mapTinyArea" class="hidden" style="margin-top:16px;">
+        <div class="field">
+          <label>Coluna de SKU / Código</label>
+          <select id="mapTinySku"></select>
+        </div>
+        <div class="map-grid">
+          <div class="field">
+            <label>Coluna de Descrição</label>
+            <select id="mapTinyDesc"></select>
+          </div>
+          <div class="field">
+            <label>Coluna de Saldo (qtd. sistema)</label>
+            <select id="mapTinySaldo"></select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Coluna de Foto / Imagem (opcional)</label>
+          <select id="mapTinyFoto"></select>
+        </div>
+        <div class="small-note" id="previewNoteTiny"></div>
+      </div>
+    </div>
+
+    <div class="card" id="cardPedidos">
+      <h2>2. Importar pedidos do dia</h2>
+      <div class="hint">Exporte os relatórios de pedidos/vendas de hoje de cada canal. Só os produtos que aparecerem aqui vão entrar na contagem.</div>
+
+      <div style="display:flex; gap:8px; margin-top:10px;">
+        <button type="button" class="step-pill active" id="chTabMl" style="cursor:pointer; border:none;">Mercado Livre</button>
+        <button type="button" class="step-pill" id="chTabSh" style="cursor:pointer; border:none;">Shopee</button>
+      </div>
+
+      <div id="chPanelMl" style="margin-top:12px;">
+        <div class="small-note" id="chStatusMl">Ainda não importado.</div>
+        <div class="dropzone" id="dzPedidosMl">
+          <div class="icon">🧾</div>
+          <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX de pedidos do Mercado Livre</div>
+          <input type="file" id="filePedidosMl" accept=".csv,.xlsx,.xls">
+        </div>
+        <div id="mapPedidosAreaMl" class="hidden" style="margin-top:16px;">
+          <div class="field">
+            <label>Coluna de SKU / Código</label>
+            <select id="mapPedSkuMl"></select>
+          </div>
+          <div class="map-grid">
+            <div class="field">
+              <label>Coluna de Descrição</label>
+              <select id="mapPedDescMl"></select>
+            </div>
+            <div class="field">
+              <label>Coluna de Quantidade vendida</label>
+              <select id="mapPedQtdMl"></select>
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Número/ID do Pedido (opcional)</label>
+            <select id="mapPedIdMl"></select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Data Máxima de Despacho (opcional)</label>
+            <select id="mapPedDespachoMl"></select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Valor de Custo (opcional)</label>
+            <select id="mapPedCustoMl"></select>
+          </div>
+          <div class="small-note" id="previewNotePedMl"></div>
+        </div>
+      </div>
+
+      <div id="chPanelSh" class="hidden" style="margin-top:12px;">
+        <div class="small-note" id="chStatusSh">Ainda não importado.</div>
+        <div class="dropzone" id="dzPedidosSh">
+          <div class="icon">🧾</div>
+          <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX de pedidos da Shopee</div>
+          <input type="file" id="filePedidosSh" accept=".csv,.xlsx,.xls">
+        </div>
+        <div id="mapPedidosAreaSh" class="hidden" style="margin-top:16px;">
+          <div class="field">
+            <label>Coluna de SKU / Código</label>
+            <select id="mapPedSkuSh"></select>
+          </div>
+          <div class="map-grid">
+            <div class="field">
+              <label>Coluna de Descrição</label>
+              <select id="mapPedDescSh"></select>
+            </div>
+            <div class="field">
+              <label>Coluna de Quantidade vendida</label>
+              <select id="mapPedQtdSh"></select>
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Número/ID do Pedido (opcional)</label>
+            <select id="mapPedIdSh"></select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Data Máxima de Despacho (opcional)</label>
+            <select id="mapPedDespachoSh"></select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Coluna de Valor de Custo (opcional)</label>
+            <select id="mapPedCustoSh"></select>
+          </div>
+          <div class="small-note" id="previewNotePedSh"></div>
+          <div class="small-note" id="dispatchSplitNoteSh" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <div class="small-note" style="margin-top:12px;">Se o mesmo SKU aparecer em vários pedidos (do mesmo canal ou dos dois juntos), o app soma tudo automaticamente e junta os números dos pedidos na mesma linha, marcando de qual canal veio cada um.</div>
+      <button class="btn btn-primary btn-block" id="confirmPedidos" style="margin-top:10px;">Confirmar pedidos</button>
+    </div>
+
+    <button class="btn btn-primary btn-block" id="confirmTiny" style="margin-bottom:16px;">Cruzar e iniciar contagem</button>
+
+
+  </section>
+
+  <!-- STEP 2: COUNTING - MERCADO LIVRE -->
+  <section id="step2" class="hidden">
+    <div class="card" style="padding-bottom:10px;">
+      <h2>Contagem — Mercado Livre</h2>
+      <div class="hint">Só os produtos que tiveram venda no Mercado Livre hoje aparecem aqui.</div>
+      <div class="toolbar">
+        <input type="text" id="searchBoxMl" placeholder="Buscar por SKU ou descrição...">
+      </div>
+      <div class="toolbar" style="margin-bottom:0;" id="filterChipsMl">
+        <span class="filter-chip active" data-filter="all">Todos</span>
+        <span class="filter-chip" data-filter="pending">Não contados</span>
+        <span class="filter-chip" data-filter="crit">Divergência crítica</span>
+        <span class="filter-chip" data-filter="nomatch">Sem saldo no Tiny</span>
+      </div>
+      <button class="btn btn-ghost btn-block" id="btnResetSessionMl" style="margin-top:12px;">🔄 Encerrar contagem de hoje e começar nova (apaga pra todos)</button>
+    </div>
+
+    <div style="display:flex; gap:8px; margin:0 0 12px;">
+      <button type="button" class="step-pill active" id="mlBucketTabHoje" style="cursor:pointer; border:none;">Pedidos para despachar hoje</button>
+      <button type="button" class="step-pill" id="mlBucketTabOutros" style="cursor:pointer; border:none;">Pedidos para despachar outros dias</button>
+    </div>
+
+    <div id="mlBucketPanelHoje">
+      <div style="display:flex; gap:8px; margin-bottom:12px;">
+        <input type="text" id="manualItemInputMl" placeholder="Novo pedido: nome da peça..." style="flex:1;">
+        <button class="btn btn-primary" id="btnAddManualMl" style="white-space:nowrap;">+ Adicionar</button>
+      </div>
+      <div id="itemListMl"></div>
+      <div class="empty hidden" id="emptyStateMl">Nenhum item encontrado com esse filtro.</div>
+    </div>
+
+    <div id="mlBucketPanelOutros" class="hidden">
+      <div class="small-note" style="margin-bottom:10px;">Pedidos com despacho previsto pra outro dia — ordenados pela data mais próxima primeiro. Contar aqui é opcional, serve pra já ir adiantando a separação.</div>
+      <div id="itemListMlOutros"></div>
+      <div class="empty hidden" id="emptyStateMlOutros">Nenhum pedido para outros dias.</div>
+    </div>
+
+    <button class="btn btn-primary btn-block" id="btnSaveWhatsappMl" style="margin-top:12px;">💾 Salvar e enviar relatório <svg width="18" height="18" viewBox="0 0 32 32" style="vertical-align:-4px; margin-left:6px;"><circle cx="16" cy="16" r="16" fill="#25D366"/><path fill="#fff" d="M23.5 8.5c-2-2-4.6-3.1-7.5-3.1-5.8 0-10.6 4.7-10.6 10.6 0 1.9.5 3.7 1.4 5.3L5.5 26.5l5.3-1.4c1.5.8 3.2 1.3 5 1.3 5.8 0 10.6-4.7 10.6-10.6 0-2.8-1.1-5.5-3.1-7.5zm-7.5 16.3c-1.6 0-3.1-.4-4.5-1.2l-.3-.2-3.3.9.9-3.2-.2-.3c-.9-1.4-1.3-3-1.3-4.7 0-4.8 3.9-8.7 8.7-8.7 2.3 0 4.5.9 6.1 2.6 1.6 1.6 2.6 3.8 2.6 6.1 0 4.8-3.9 8.7-8.7 8.7zm4.8-6.5c-.3-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1-.2.3-.7.8-.8 1-.2.2-.3.2-.5.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.6.1-.1.3-.3.4-.5.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4-.1-.1-.6-1.4-.8-1.9-.2-.5-.4-.4-.6-.4h-.5c-.2 0-.4.1-.6.3-.2.2-.8.8-.8 1.9 0 1.1.8 2.2.9 2.4.1.2 1.6 2.4 3.8 3.4.5.2 1 .4 1.3.5.5.2 1 .1 1.4.1.4-.1 1.3-.5 1.5-1 .2-.5.2-.9.1-1z"/></svg></button>
+    <div class="small-note" id="whatsappStatusNoteMl" style="margin-top:6px; margin-bottom:16px;"></div>
+  </section>
+
+  <!-- STEP 3: COUNTING - SHOPEE -->
+  <section id="step3" class="hidden">
+    <div class="card" style="padding-bottom:10px;">
+      <h2>Contagem — Shopee</h2>
+      <div class="hint">Só os produtos que tiveram venda na Shopee hoje aparecem aqui.</div>
+      <div class="toolbar">
+        <input type="text" id="searchBoxSh" placeholder="Buscar por SKU ou descrição...">
+      </div>
+      <div class="toolbar" style="margin-bottom:0;" id="filterChipsSh">
+        <span class="filter-chip active" data-filter="all">Todos</span>
+        <span class="filter-chip" data-filter="pending">Não contados</span>
+        <span class="filter-chip" data-filter="crit">Divergência crítica</span>
+        <span class="filter-chip" data-filter="nomatch">Sem saldo no Tiny</span>
+      </div>
+      <button class="btn btn-ghost btn-block" id="btnResetSessionSh" style="margin-top:12px;">🔄 Encerrar contagem de hoje e começar nova (apaga pra todos)</button>
+    </div>
+
+    <div style="display:flex; gap:8px; margin:0 0 12px;">
+      <button type="button" class="step-pill active" id="shBucketTabHoje" style="cursor:pointer; border:none;">Pedidos para despachar hoje</button>
+      <button type="button" class="step-pill" id="shBucketTabOutros" style="cursor:pointer; border:none;">Pedidos para despachar outros dias</button>
+    </div>
+
+    <div id="shBucketPanelHoje">
+      <div style="display:flex; gap:8px; margin-bottom:12px;">
+        <input type="text" id="manualItemInputSh" placeholder="Novo pedido: nome da peça..." style="flex:1;">
+        <button class="btn btn-primary" id="btnAddManualSh" style="white-space:nowrap;">+ Adicionar</button>
+      </div>
+      <div id="itemListSh"></div>
+      <div class="empty hidden" id="emptyStateSh">Nenhum item encontrado com esse filtro.</div>
+    </div>
+
+    <div id="shBucketPanelOutros" class="hidden">
+      <div class="small-note" style="margin-bottom:10px;">Pedidos com despacho previsto pra outro dia (ou já vencidos) — ordenados pela data mais próxima primeiro. Contar aqui é opcional, serve pra já ir adiantando a separação.</div>
+      <div id="itemListShOutros"></div>
+      <div class="empty hidden" id="emptyStateShOutros">Nenhum pedido para outros dias.</div>
+    </div>
+
+    <button class="btn btn-primary btn-block" id="btnSaveWhatsappSh" style="margin-top:12px;">💾 Salvar e enviar relatório <svg width="18" height="18" viewBox="0 0 32 32" style="vertical-align:-4px; margin-left:6px;"><circle cx="16" cy="16" r="16" fill="#25D366"/><path fill="#fff" d="M23.5 8.5c-2-2-4.6-3.1-7.5-3.1-5.8 0-10.6 4.7-10.6 10.6 0 1.9.5 3.7 1.4 5.3L5.5 26.5l5.3-1.4c1.5.8 3.2 1.3 5 1.3 5.8 0 10.6-4.7 10.6-10.6 0-2.8-1.1-5.5-3.1-7.5zm-7.5 16.3c-1.6 0-3.1-.4-4.5-1.2l-.3-.2-3.3.9.9-3.2-.2-.3c-.9-1.4-1.3-3-1.3-4.7 0-4.8 3.9-8.7 8.7-8.7 2.3 0 4.5.9 6.1 2.6 1.6 1.6 2.6 3.8 2.6 6.1 0 4.8-3.9 8.7-8.7 8.7zm4.8-6.5c-.3-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1-.2.3-.7.8-.8 1-.2.2-.3.2-.5.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.6.1-.1.3-.3.4-.5.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4-.1-.1-.6-1.4-.8-1.9-.2-.5-.4-.4-.6-.4h-.5c-.2 0-.4.1-.6.3-.2.2-.8.8-.8 1.9 0 1.1.8 2.2.9 2.4.1.2 1.6 2.4 3.8 3.4.5.2 1 .4 1.3.5.5.2 1 .1 1.4.1.4-.1 1.3-.5 1.5-1 .2-.5.2-.9.1-1z"/></svg></button>
+    <div class="small-note" id="whatsappStatusNoteSh" style="margin-top:6px; margin-bottom:16px;"></div>
+  </section>
+
+  <!-- STEP 4: SUMMARY -->
+  <section id="step4" class="hidden">
+    <div class="card">
+      <h2>Resumo da conferência</h2>
+      <div class="hint">Itens ordenados por criticidade — o que mais impacta primeiro.</div>
+
+      <div class="summary-row">
+        <div class="summary-box sb-green"><span class="num" id="cntOk">0</span><span class="lbl">OK</span></div>
+        <div class="summary-box sb-amber"><span class="num" id="cntWarn">0</span><span class="lbl">Pequena</span></div>
+        <div class="summary-box sb-red"><span class="num" id="cntCrit">0</span><span class="lbl">Crítica</span></div>
+        <div class="summary-box sb-pending"><span class="num" id="cntPend">0</span><span class="lbl">Pendente</span></div>
+        <div class="summary-box sb-gray"><span class="num" id="cntNomatch">0</span><span class="lbl">Sem saldo</span></div>
+      </div>
+
+      <details class="adv">
+        <summary>Ajustar limite de criticidade</summary>
+        <div class="field">
+          <label>A partir de quantas unidades de diferença é considerado crítico</label>
+          <input type="number" id="thresholdInput" min="1" step="1" value="1">
+        </div>
+      </details>
+
+      <button class="btn btn-primary btn-block" id="btnSaveWhatsapp" style="margin-top:12px;">💾 Salvar e enviar relatório (PDF) por WhatsApp</button>
+      <div class="small-note" id="whatsappStatusNote" style="margin-top:6px;"></div>
+    </div>
+
+    <div id="divergenceList"></div>
+  </section>
+
+  <!-- STEP 5: REPOSIÇÃO DE ESTOQUE (zerados) -->
+  <section id="step5" class="hidden">
+    <div class="card">
+      <h2>Reposição de Estoque</h2>
+      <div class="hint">Produtos que já foram contados e vieram zerados na contagem física — precisam ser repostos.</div>
+    </div>
+    <div id="zeradosList"></div>
+    <div class="empty hidden" id="emptyStateZerados">Nenhum item contado zerado até agora.</div>
+  </section>
+
+  <!-- STEP 6: RELATÓRIO DO DIA -->
+  <section id="step6" class="hidden">
+    <div class="card">
+      <h2>Relatório do Dia</h2>
+      <div class="hint">Produto e estoque atual — quando teve contagem manual, ela vale sobre o saldo do sistema.</div>
+      <input type="text" id="searchBoxRelatorio" placeholder="Buscar por SKU ou descrição..." style="margin-top:10px;">
+    </div>
+    <div id="relatorioList"></div>
+    <div class="empty hidden" id="emptyStateRelatorio">Nenhum produto pra mostrar ainda.</div>
+
+    <button class="btn btn-primary btn-block" id="btnSaveWhatsappRel" style="margin-top:12px;">💾 Salvar e enviar relatório <svg width="18" height="18" viewBox="0 0 32 32" style="vertical-align:-4px; margin-left:6px;"><circle cx="16" cy="16" r="16" fill="#25D366"/><path fill="#fff" d="M23.5 8.5c-2-2-4.6-3.1-7.5-3.1-5.8 0-10.6 4.7-10.6 10.6 0 1.9.5 3.7 1.4 5.3L5.5 26.5l5.3-1.4c1.5.8 3.2 1.3 5 1.3 5.8 0 10.6-4.7 10.6-10.6 0-2.8-1.1-5.5-3.1-7.5zm-7.5 16.3c-1.6 0-3.1-.4-4.5-1.2l-.3-.2-3.3.9.9-3.2-.2-.3c-.9-1.4-1.3-3-1.3-4.7 0-4.8 3.9-8.7 8.7-8.7 2.3 0 4.5.9 6.1 2.6 1.6 1.6 2.6 3.8 2.6 6.1 0 4.8-3.9 8.7-8.7 8.7zm4.8-6.5c-.3-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1-.2.3-.7.8-.8 1-.2.2-.3.2-.5.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.6.1-.1.3-.3.4-.5.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4-.1-.1-.6-1.4-.8-1.9-.2-.5-.4-.4-.6-.4h-.5c-.2 0-.4.1-.6.3-.2.2-.8.8-.8 1.9 0 1.1.8 2.2.9 2.4.1.2 1.6 2.4 3.8 3.4.5.2 1 .4 1.3.5.5.2 1 .1 1.4.1.4-.1 1.3-.5 1.5-1 .2-.5.2-.9.1-1z"/></svg></button>
+    <div class="small-note" id="whatsappStatusNoteRel" style="margin-top:6px; margin-bottom:16px;"></div>
+  </section>
+
+
+</main>
+<div class="fab-bar hidden" id="fabBar"></div>
+</div>
+
+
+<div id="tab-hist" class="tool-panel hidden">
+<header class="topbar">
+  <div style="display:flex; align-items:center; gap:10px;">
+    <img src="https://ajbengoa.com.br/wp-content/uploads/2023/03/cropped-icone-192x192.png" alt="" style="width:34px; height:34px; border-radius:8px;">
+    <div>
+      <h1 style="font-size:17px;">Histórico</h1>
+      <div class="sublabel">registro do que foi contado, mês a mês</div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <h2>Filtrar por mês</h2>
+    <div class="field">
+      <label>Mês</label>
+      <select id="hist_monthSelect"></select>
+    </div>
+    <div class="small-note" id="hist_statusText">Carregando histórico…</div>
+  </div>
+
+  <div class="card">
+    <h2>Produtos mais vendidos do mês</h2>
+    <div class="hint">Separado por marketplace — top 10 de cada um.</div>
+    <div style="margin-top:8px;">
+      <div class="small-note" style="font-weight:600; color:var(--ink);">Mercado Livre</div>
+      <div id="hist_topMl"></div>
+    </div>
+    <div style="margin-top:16px;">
+      <div class="small-note" style="font-weight:600; color:var(--ink);">Shopee</div>
+      <div id="hist_topSh"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Produtos com mais divergência</h2>
+    <div class="hint">Onde a contagem manual mais destoou do saldo do sistema, somado no mês.</div>
+    <div id="hist_topDiverg" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>Apagar histórico</h2>
+    <div class="hint">Passou o mês e não precisa mais guardar? Apague pra não deixar o banco de dados pesado.</div>
+    <button class="btn btn-ghost btn-block" id="hist_btnDeleteMonth" style="margin-top:8px;">🗑️ Apagar histórico do mês selecionado</button>
+    <button class="btn btn-ghost btn-block" id="hist_btnDeleteAll" style="margin-top:8px;">🗑️ Apagar TODO o histórico</button>
+  </div>
+</main>
+</div>
+
+<script>
+
+(function(){
+  "use strict";
+
+  const LS_KEY = "conferencia_estoque_ajb_v2";
+  let state = {
+    items: [],
+    threshold: 1,
+    filterMl: "all",
+    filterSh: "all",
+    searchMl: "",
+    searchSh: ""
+  };
+
+  let tiny = null;
+
+  function save(){
+    try{ localStorage.setItem(LS_KEY, JSON.stringify(state)); }catch(e){ console.warn("Falha ao salvar", e); }
+  }
+  function load(){
+    try{
+      const raw = localStorage.getItem(LS_KEY);
+      if(!raw) return null;
+      return JSON.parse(raw);
+    }catch(e){ return null; }
+  }
+  function clearSaved(){
+    try{ localStorage.removeItem(LS_KEY); }catch(e){}
+  }
+
+  const el = id => document.getElementById(id);
+
+  const cardKits = el("cardKits");
+  const dzKits = el("dzKits");
+  const fileKits = el("fileKits");
+  const mapKitsArea = el("mapKitsArea");
+  const mapKitSkuPar = el("mapKitSkuPar"), mapKitSkuComp = el("mapKitSkuComp"), mapKitQtd = el("mapKitQtd");
+  const mapKitCompDesc = el("mapKitCompDesc");
+  const mapKitDescPar = el("mapKitDescPar");
+  const previewNoteKits = el("previewNoteKits");
+  const kitsStatusText = el("kitsStatusText");
+  const btnClearKits = el("btnClearKits");
+
+  const cardPedidos = el("cardPedidos");
+  const chTabMl = el("chTabMl"), chTabSh = el("chTabSh");
+  const chPanelMl = el("chPanelMl"), chPanelSh = el("chPanelSh");
+  const chStatusMl = el("chStatusMl"), chStatusSh = el("chStatusSh");
+
+  const dzPedidosMl = el("dzPedidosMl");
+  const filePedidosMl = el("filePedidosMl");
+  const mapPedidosAreaMl = el("mapPedidosAreaMl");
+  const mapPedSkuMl = el("mapPedSkuMl"), mapPedDescMl = el("mapPedDescMl"), mapPedQtdMl = el("mapPedQtdMl");
+  const mapPedIdMl = el("mapPedIdMl");
+  const previewNotePedMl = el("previewNotePedMl");
+
+  const dzPedidosSh = el("dzPedidosSh");
+  const filePedidosSh = el("filePedidosSh");
+  const mapPedidosAreaSh = el("mapPedidosAreaSh");
+  const mapPedSkuSh = el("mapPedSkuSh"), mapPedDescSh = el("mapPedDescSh"), mapPedQtdSh = el("mapPedQtdSh");
+  const mapPedIdSh = el("mapPedIdSh");
+  const previewNotePedSh = el("previewNotePedSh");
+
+  chTabMl.addEventListener("click", () => {
+    chTabMl.classList.add("active"); chTabSh.classList.remove("active");
+    chPanelMl.classList.remove("hidden"); chPanelSh.classList.add("hidden");
+  });
+  chTabSh.addEventListener("click", () => {
+    chTabSh.classList.add("active"); chTabMl.classList.remove("active");
+    chPanelSh.classList.remove("hidden"); chPanelMl.classList.add("hidden");
+  });
+
+  const cardTiny = el("cardTiny");
+  const dzTiny = el("dzTiny");
+  const fileTiny = el("fileTiny");
+  const mapTinyArea = el("mapTinyArea");
+  const mapTinySku = el("mapTinySku"), mapTinyDesc = el("mapTinyDesc"), mapTinySaldo = el("mapTinySaldo"), mapTinyFoto = el("mapTinyFoto");
+  const previewNoteTiny = el("previewNoteTiny");
+
+  const step1 = el("step1"), step2 = el("step2"), step3 = el("step3"), step4 = el("step4"), step5 = el("step5"), step6 = el("step6");
+  const pill1 = el("pill1"), pill2 = el("pill2"), pill3 = el("pill3"), pill4 = el("pill4"), pill5 = el("pill5"), pill6 = el("pill6");
+  const itemListMl = el("itemListMl"), itemListSh = el("itemListSh");
+  const emptyStateMl = el("emptyStateMl"), emptyStateSh = el("emptyStateSh");
+  const itemListMlOutros = el("itemListMlOutros"), emptyStateMlOutros = el("emptyStateMlOutros");
+  const itemListShOutros = el("itemListShOutros"), emptyStateShOutros = el("emptyStateShOutros");
+  const relatorioList = el("relatorioList"), emptyStateRelatorio = el("emptyStateRelatorio");
+  const searchBoxRelatorio = el("searchBoxRelatorio");
+
+  el("mlBucketTabHoje").addEventListener("click", () => {
+    el("mlBucketTabHoje").classList.add("active"); el("mlBucketTabOutros").classList.remove("active");
+    el("mlBucketPanelHoje").classList.remove("hidden"); el("mlBucketPanelOutros").classList.add("hidden");
+  });
+  el("mlBucketTabOutros").addEventListener("click", () => {
+    el("mlBucketTabOutros").classList.add("active"); el("mlBucketTabHoje").classList.remove("active");
+    el("mlBucketPanelOutros").classList.remove("hidden"); el("mlBucketPanelHoje").classList.add("hidden");
+  });
+  el("shBucketTabHoje").addEventListener("click", () => {
+    el("shBucketTabHoje").classList.add("active"); el("shBucketTabOutros").classList.remove("active");
+    el("shBucketPanelHoje").classList.remove("hidden"); el("shBucketPanelOutros").classList.add("hidden");
+  });
+  el("shBucketTabOutros").addEventListener("click", () => {
+    el("shBucketTabOutros").classList.add("active"); el("shBucketTabHoje").classList.remove("active");
+    el("shBucketPanelOutros").classList.remove("hidden"); el("shBucketPanelHoje").classList.add("hidden");
+  });
+  const searchBoxMl = el("searchBoxMl"), searchBoxSh = el("searchBoxSh");
+  const zeradosList = el("zeradosList"), emptyStateZerados = el("emptyStateZerados");
+  const fabBar = el("fabBar");
+  const subLabel = el("subLabel");
+  const thresholdInput = el("thresholdInput");
+
+  let currentStep = 1;
+  let firestoreReady = false;
+
+  function onFirestoreItems(items){
+    state.items = items;
+    save();
+    if(items.length && currentStep === 1){
+      if(location.hash === "#relatorio"){
+        goToStep(6);
+        renderRelatorioDia();
+      } else {
+        goToStep(2);
+      }
+    }
+    if(currentStep === 2 || currentStep === 3) renderItems();
+    if(currentStep === 4) renderSummary();
+    if(currentStep === 5) renderZerados();
+    if(currentStep === 6) renderRelatorioDia();
+    updateHeader();
+  }
+  function onFirestoreMeta(meta){
+    if(meta && meta.threshold){
+      state.threshold = meta.threshold;
+      thresholdInput.value = state.threshold;
+    }
+  }
+
+  function startFirestoreSync(){
+    if(firestoreReady) return;
+    firestoreReady = true;
+    window.FB.subscribe(onFirestoreItems, onFirestoreMeta);
+  }
+  if(window.FB){ startFirestoreSync(); }
+  else { window.addEventListener("fb-ready", startFirestoreSync, {once:true}); }
+
+  function parseFile(file, cb){
+    const name = file.name.toLowerCase();
+    if(name.endsWith(".csv")){
+      Papa.parse(file, {header:false, skipEmptyLines:true, complete: res => cb(res.data)});
+    } else {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const wb = XLSX.read(e.target.result, {type:"array"});
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, defval:""});
+        cb(data);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  }
+  function toHeadersRows(rows){
+    rows = rows.filter(r => r.some(c => String(c).trim() !== ""));
+    return { headers: (rows[0]||[]).map(h=>String(h).trim()), rows: rows.slice(1) };
+  }
+  function fillSelect(select, headers){
+    select.innerHTML = "";
+    headers.forEach((h, idx) => {
+      const opt = document.createElement("option");
+      opt.value = idx; opt.textContent = h || `Coluna ${idx+1}`;
+      select.appendChild(opt);
+    });
+  }
+  function autoGuess(select, headers, keywords){
+    const idx = headers.findIndex(h => keywords.some(k => h.toLowerCase().includes(k)));
+    if(idx >= 0) select.value = idx;
+  }
+  function parseNum(v){
+    if(v === null || v === undefined || v === "") return 0;
+    const n = parseFloat(String(v).replace(",", "."));
+    return isNaN(n) ? 0 : n;
+  }
+  function normSku(s){ return String(s||"").trim().toUpperCase().replace(/^#/,""); }
+  function normDesc(s){ return String(s||"").trim().toUpperCase().replace(/\s+/g," "); }
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  function setupDropzone(dz, input, onData){
+    dz.addEventListener("click", () => input.click());
+    ["dragover"].forEach(ev => dz.addEventListener(ev, e=>{ e.preventDefault(); dz.classList.add("drag"); }));
+    ["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e=>{ e.preventDefault(); dz.classList.remove("drag"); }));
+    dz.addEventListener("drop", e => { if(e.dataTransfer.files.length) parseFile(e.dataTransfer.files[0], onData); });
+    input.addEventListener("change", e => { if(e.target.files.length) parseFile(e.target.files[0], onData); });
+  }
+
+  // ---------- Composição de kits (SKU par -> SKUs componentes) ----------
+  function fillSelectWithNone(select, headers, noneLabel){
+    select.innerHTML = "";
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "-1"; noneOpt.textContent = noneLabel;
+    select.appendChild(noneOpt);
+    headers.forEach((h, idx) => {
+      const opt = document.createElement("option");
+      opt.value = idx; opt.textContent = h || `Coluna ${idx+1}`;
+      select.appendChild(opt);
+    });
+  }
+
+  function renderKitsStatus(){
+    const kits = window.KITS || {bySku:{}, byDesc:{}};
+    const kitSkus = Object.keys(kits.bySku || {});
+    if(!kitSkus.length){
+      kitsStatusText.textContent = "Nenhum kit cadastrado ainda — os SKUs vendidos serão cruzados normalmente, sem expandir componentes.";
+      return;
+    }
+    const totalComponentes = kitSkus.reduce((acc, k) => acc + (kits.bySku[k]||[]).length, 0);
+    kitsStatusText.textContent = `${kitSkus.length} SKU(s) de kit cadastrado(s), somando ${totalComponentes} componente(s). Esses SKUs (ou descrições equivalentes) serão expandidos automaticamente ao importar pedidos/vendas.`;
+  }
+  window.addEventListener("kits-updated", renderKitsStatus);
+  renderKitsStatus();
+
+  let kitsRaw = null;
+  setupDropzone(dzKits, fileKits, (data) => {
+    kitsRaw = toHeadersRows(data);
+    fillSelect(mapKitSkuPar, kitsRaw.headers);
+    fillSelect(mapKitSkuComp, kitsRaw.headers);
+    fillSelectWithNone(mapKitQtd, kitsRaw.headers, "— usar 1 por padrão —");
+    fillSelectWithNone(mapKitCompDesc, kitsRaw.headers, "— não usar descrição —");
+    fillSelectWithNone(mapKitDescPar, kitsRaw.headers, "— não usar descrição —");
+    autoGuess(mapKitSkuPar, kitsRaw.headers, ["sku do kit","sku par","sku pai"]);
+    autoGuess(mapKitSkuComp, kitsRaw.headers, ["sku do componente","sku componente","sku filho"]);
+    autoGuess(mapKitQtd, kitsRaw.headers, ["quantidade","qtd","quant"]);
+    autoGuess(mapKitCompDesc, kitsRaw.headers, ["descrição componente","descriçao componente","descricao componente"]);
+    autoGuess(mapKitDescPar, kitsRaw.headers, ["descriçao do kit","descrição do kit","descricao do kit"]);
+    mapKitsArea.classList.remove("hidden");
+    dzKits.classList.add("filled");
+    updateKitsPreview();
+    [mapKitSkuPar, mapKitSkuComp, mapKitQtd, mapKitCompDesc, mapKitDescPar].forEach(sel => sel.onchange = updateKitsPreview);
+  });
+  function updateKitsPreview(){
+    const p = mapKitSkuPar.value, c = mapKitSkuComp.value, dp = mapKitDescPar.value;
+    const sample = (kitsRaw && kitsRaw.rows[0]) || [];
+    const descTxt = dp >= 0 ? ` (desc. "${sample[dp] ?? ""}")` : "";
+    previewNoteKits.textContent = `Exemplo: kit "${sample[p] ?? ""}"${descTxt} · componente "${sample[c] ?? ""}"`;
+  }
+
+  el("confirmKits").addEventListener("click", () => {
+    if(!kitsRaw) return;
+    const p = parseInt(mapKitSkuPar.value), c = parseInt(mapKitSkuComp.value);
+    const qIdx = parseInt(mapKitQtd.value);
+    const dIdx = parseInt(mapKitCompDesc.value);
+    const dpIdx = parseInt(mapKitDescPar.value);
+    const useQtd = qIdx >= 0;
+    const useDesc = dIdx >= 0;
+    const useDescPar = dpIdx >= 0;
+    const bySku = {};
+    const byDesc = {};
+    kitsRaw.rows.forEach(r => {
+      const kitSkuRaw = String(r[p] ?? "").trim();
+      const compSkuRaw = String(r[c] ?? "").trim();
+      const kitDescRaw = useDescPar ? String(r[dpIdx] ?? "").trim() : "";
+      if((!kitSkuRaw && !kitDescRaw) || !compSkuRaw) return;
+      const qty = useQtd ? (parseNum(r[qIdx]) || 1) : 1;
+      const desc = useDesc ? String(r[dIdx] ?? "").trim() : "";
+      const comp = { sku: compSkuRaw, qty, desc };
+      if(kitSkuRaw){
+        const skuKey = normSku(kitSkuRaw);
+        if(!bySku[skuKey]) bySku[skuKey] = [];
+        bySku[skuKey].push(comp);
+      }
+      if(kitDescRaw){
+        const descKey = normDesc(kitDescRaw);
+        if(!byDesc[descKey]) byDesc[descKey] = [];
+        byDesc[descKey].push(comp);
+      }
+    });
+    const newKits = { bySku, byDesc };
+    window.FB.saveKits(newKits).then(() => {
+      window.KITS = newKits;
+      renderKitsStatus();
+      mapKitsArea.classList.add("hidden");
+      dzKits.classList.remove("filled");
+      kitsRaw = null;
+      alert("Composição de kits salva.");
+    }).catch(err => {
+      console.error("Erro ao salvar composição de kits", err);
+      alert("Não consegui salvar a composição de kits agora (sem internet?). Tente de novo.");
+    });
+  });
+
+  btnClearKits.addEventListener("click", () => {
+    if(!confirm("Apagar toda a composição de kits salva?")) return;
+    window.FB.saveKits({bySku:{}, byDesc:{}}).then(() => {
+      window.KITS = {bySku:{}, byDesc:{}};
+      renderKitsStatus();
+      alert("Composição de kits apagada.");
+    }).catch(err => {
+      console.error("Erro ao apagar composição de kits", err);
+      alert("Não consegui apagar agora (sem internet?). Tente de novo.");
+    });
+  });
+
+  // ---------- marca SKUs (ou descrições) vendidos que são kit, anexando a lista de componentes ----------
+  function attachKitInfo(agg){
+    const kits = window.KITS || {bySku:{}, byDesc:{}};
+    agg.forEach((p, key) => {
+      let comps = (kits.bySku || {})[key];
+      let matchedKitBy = comps ? "sku" : null;
+      if(!comps && p.desc){
+        comps = (kits.byDesc || {})[normDesc(p.desc)];
+        if(comps) matchedKitBy = "descricao";
+      }
+      if(comps && comps.length){
+        p.kitComponents = comps.map(c => ({ sku: c.sku, qty: c.qty || 1, desc: c.desc || "" }));
+        p.kitMatchedBy = matchedKitBy;
+      }
+    });
+    return agg;
+  }
+
+  let pedidosMl = null, pedidosSh = null;
+
+  function parseDateFlexible(v){
+    if(v === null || v === undefined || v === "") return null;
+    if(v instanceof Date && !isNaN(v.getTime())) return v;
+    const s = String(v).trim();
+    let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if(m){
+      let [, d, mo, y] = m;
+      if(y.length===2) y = "20"+y;
+      const dt = new Date(parseInt(y), parseInt(mo)-1, parseInt(d));
+      return isNaN(dt.getTime()) ? null : dt;
+    }
+    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if(m){
+      const [, y, mo, d] = m;
+      const dt = new Date(parseInt(y), parseInt(mo)-1, parseInt(d));
+      return isNaN(dt.getTime()) ? null : dt;
+    }
+    if(/^\d+(\.\d+)?$/.test(s)){
+      const n = parseFloat(s);
+      if(n > 20000 && n < 60000){
+        const epoch = new Date(Date.UTC(1899,11,30));
+        const dt = new Date(epoch.getTime() + n*86400000);
+        return isNaN(dt.getTime()) ? null : dt;
+      }
+    }
+    return null;
+  }
+  function isSameDay(a,b){
+    return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate();
+  }
+  function classifyDispatch(dateObj, today){
+    // sem data -> trata como hoje (não sabemos, então não perde o pedido)
+    if(!dateObj) return "hoje";
+    if(isSameDay(dateObj, today)) return "hoje";
+    const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    if(dateObj > todayMidnight) return "outros"; // data futura
+    return "vencido"; // data passada -> fica de fora de tudo
+  }
+  function formatDateBR(d){
+    return String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0")+"/"+d.getFullYear();
+  }
+  function formatBRL(v){
+    return "R$ " + Number(v).toFixed(2).replace(".", ",");
+  }
+  function custoTotalValue(it){
+    if(it.custoTotalOverride != null) return it.custoTotalOverride;
+    if(it.custoUnitario != null) return it.custoUnitario.toFixed(2);
+    return "";
+  }
+
+  function setupPedidosChannel(dz, fileInput, mapArea, mapSku, mapDesc, mapQtd, mapId, previewNote, statusEl, label, setData, opts){
+    opts = opts || {};
+    setupDropzone(dz, fileInput, (data) => {
+      const parsed = toHeadersRows(data);
+      setData(parsed);
+      fillSelect(mapSku, parsed.headers);
+      fillSelect(mapDesc, parsed.headers);
+      fillSelect(mapQtd, parsed.headers);
+      autoGuess(mapSku, parsed.headers, ["sku","código","codigo","cod"]);
+      autoGuess(mapDesc, parsed.headers, ["descr","produto","nome","item"]);
+      autoGuess(mapQtd, parsed.headers, ["qtd","quantidade","quant"]);
+      fillSelectWithNone(mapId, parsed.headers, "— não usar número do pedido —");
+      autoGuess(mapId, parsed.headers, ["número do pedido","numero do pedido","nº pedido","n° pedido","id pedido","pedido"]);
+      if(opts.mapDespacho){
+        fillSelectWithNone(opts.mapDespacho, parsed.headers, "— não usar data de despacho —");
+        autoGuess(opts.mapDespacho, parsed.headers, ["data máxima de despacho","data maxima de despacho","prazo de despacho","data de despacho","despacho"]);
+      }
+      if(opts.mapCusto){
+        fillSelectWithNone(opts.mapCusto, parsed.headers, "— não usar custo —");
+        autoGuess(opts.mapCusto, parsed.headers, ["valor de custo","custo unitário","custo unitario","preço de custo","preco de custo","custo"]);
+      }
+      mapArea.classList.remove("hidden");
+      dz.classList.add("filled");
+      const updatePreview = () => {
+        const s = mapSku.value, d = mapDesc.value, q = mapQtd.value;
+        const sample = parsed.rows[0] || [];
+        previewNote.textContent = `Exemplo: SKU "${sample[s] ?? ""}" · "${sample[d] ?? ""}" · qtd ${sample[q] ?? ""}`;
+        if(opts.onUpdate) opts.onUpdate(parsed);
+      };
+      updatePreview();
+      const watchSels = [mapSku, mapDesc, mapQtd, mapId];
+      if(opts.mapDespacho) watchSels.push(opts.mapDespacho);
+      if(opts.mapCusto) watchSels.push(opts.mapCusto);
+      watchSels.forEach(sel => sel.onchange = updatePreview);
+      statusEl.textContent = `${label}: ${parsed.rows.length} linha(s) carregada(s).`;
+    });
+  }
+
+  setupPedidosChannel(dzPedidosMl, filePedidosMl, mapPedidosAreaMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, previewNotePedMl, chStatusMl, "Mercado Livre", (d) => { pedidosMl = d; }, {
+    mapDespacho: el("mapPedDespachoMl"),
+    mapCusto: el("mapPedCustoMl"),
+    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoMl"), mapPedSkuMl, mapPedQtdMl, el("dispatchSplitNoteMl"))
+  });
+  setupPedidosChannel(dzPedidosSh, filePedidosSh, mapPedidosAreaSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, previewNotePedSh, chStatusSh, "Shopee", (d) => { pedidosSh = d; }, {
+    mapDespacho: el("mapPedDespachoSh"),
+    mapCusto: el("mapPedCustoSh"),
+    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoSh"), mapPedSkuSh, mapPedQtdSh, el("dispatchSplitNoteSh"))
+  });
+
+  function renderDispatchSplitNote(parsed, mapDespachoEl, mapSkuEl, mapQtdEl, noteEl){
+    const dIdx = parseInt(mapDespachoEl.value);
+    if(!(dIdx >= 0)){
+      noteEl.textContent = "";
+      return;
+    }
+    const sIdx = parseInt(mapSkuEl.value);
+    const today = new Date();
+    let hojeCount = 0, outrosCount = 0, vencidoCount = 0;
+    parsed.rows.forEach(r => {
+      const skuRaw = String(r[sIdx] ?? "").trim();
+      if(!skuRaw) return;
+      const dateObj = parseDateFlexible(r[dIdx]);
+      const cls = classifyDispatch(dateObj, today);
+      if(cls === "hoje") hojeCount++;
+      else if(cls === "outros") outrosCount++;
+      else vencidoCount++;
+    });
+    noteEl.textContent = `${hojeCount} linha(s) pra despachar hoje (entram na contagem abaixo), ${outrosCount} pra outros dias.${vencidoCount ? ` ${vencidoCount} linha(s) com data já vencida foram ignoradas (fora da contagem).` : ""}`;
+  }
+
+  let pedidosAgg = null;
+  let pedidosAggOutros = null;
+  let pedidosAggOutrosSh = null;
+
+  function addChannelToAgg(agg, parsed, mapSku, mapDesc, mapQtd, mapId, channelLabel, rowFilter, mapCusto){
+    if(!parsed) return;
+    const s = parseInt(mapSku.value), d = parseInt(mapDesc.value), q = parseInt(mapQtd.value);
+    const idIdx = parseInt(mapId.value);
+    const useId = idIdx >= 0;
+    const custoIdx = mapCusto ? parseInt(mapCusto.value) : -1;
+    const useCusto = custoIdx >= 0;
+    let lastRawId = "";
+    parsed.rows.forEach(r => {
+      let rawId = useId ? String(r[idIdx] ?? "").trim() : "";
+      // planilhas com a coluna de pedido "mesclada" no Excel deixam as linhas
+      // seguintes do mesmo pedido em branco — repete o último número visto
+      if(useId && !rawId && lastRawId) rawId = lastRawId;
+      if(useId && rawId) lastRawId = rawId;
+
+      if(rowFilter && !rowFilter(r)) return;
+      const skuRaw = String(r[s] ?? "").trim();
+      if(!skuRaw) return;
+      const key = normSku(skuRaw);
+      const qtd = parseNum(r[q]);
+      const descRaw = String(r[d] ?? "").trim();
+      const pedidoId = rawId ? `${channelLabel}: ${rawId}` : "";
+      const custoVal = useCusto ? parseNum(r[custoIdx]) : null;
+      if(agg.has(key)){
+        const entry = agg.get(key);
+        entry.qtd += qtd;
+        entry.qtyByChannel[channelLabel] = (entry.qtyByChannel[channelLabel]||0) + qtd;
+        if(pedidoId && !entry.pedidoIds.includes(pedidoId)) entry.pedidoIds.push(pedidoId);
+        if(!entry.channels.includes(channelLabel)) entry.channels.push(channelLabel);
+        if(entry.custoUnitario == null && custoVal) entry.custoUnitario = custoVal;
+      } else {
+        agg.set(key, {sku:skuRaw, desc:descRaw, qtd, pedidoIds: pedidoId ? [pedidoId] : [], channels:[channelLabel], qtyByChannel:{[channelLabel]:qtd}, custoUnitario: custoVal || null});
+      }
+    });
+  }
+
+  function buildOutrosAgg(parsed, mapSku, mapDesc, mapQtd, mapId, dIdx, mapCusto, channelLabel){
+    const agg = new Map();
+    if(!parsed || !(dIdx >= 0)) return agg;
+    const s = parseInt(mapSku.value), d = parseInt(mapDesc.value), q = parseInt(mapQtd.value);
+    const idIdx = parseInt(mapId.value);
+    const useId = idIdx >= 0;
+    const custoIdx = mapCusto ? parseInt(mapCusto.value) : -1;
+    const useCusto = custoIdx >= 0;
+    const today = new Date();
+    let lastRawId = "";
+    parsed.rows.forEach(r => {
+      let rawId = useId ? String(r[idIdx] ?? "").trim() : "";
+      if(useId && !rawId && lastRawId) rawId = lastRawId;
+      if(useId && rawId) lastRawId = rawId;
+
+      const skuRaw = String(r[s] ?? "").trim();
+      if(!skuRaw) return;
+      const dateObj = parseDateFlexible(r[dIdx]);
+      if(classifyDispatch(dateObj, today) !== "outros") return; // só data futura entra aqui
+      const key = normSku(skuRaw);
+      const qtd = parseNum(r[q]);
+      const descRaw = String(r[d] ?? "").trim();
+      const pedidoId = rawId ? `${channelLabel}: ${rawId}` : "";
+      const custoVal = useCusto ? parseNum(r[custoIdx]) : null;
+      if(agg.has(key)){
+        const entry = agg.get(key);
+        entry.qtd += qtd;
+        entry.qtyByChannel[channelLabel] = (entry.qtyByChannel[channelLabel]||0) + qtd;
+        if(pedidoId && !entry.pedidoIds.includes(pedidoId)) entry.pedidoIds.push(pedidoId);
+        if(dateObj < entry.dataDespacho) entry.dataDespacho = dateObj;
+        if(entry.custoUnitario == null && custoVal) entry.custoUnitario = custoVal;
+      } else {
+        agg.set(key, {sku:skuRaw, desc:descRaw, qtd, pedidoIds: pedidoId?[pedidoId]:[], channels:[channelLabel], qtyByChannel:{[channelLabel]:qtd}, dataDespacho: dateObj, custoUnitario: custoVal || null});
+      }
+    });
+    return agg;
+  }
+
+  el("confirmPedidos").addEventListener("click", () => {
+    if(!pedidosMl && !pedidosSh){
+      alert("Importa pelo menos um dos dois canais (Mercado Livre ou Shopee) antes de confirmar.");
+      return;
+    }
+    pedidosAgg = new Map();
+    const dIdx = parseInt(el("mapPedDespachoMl").value);
+    let mlFilter = null;
+    if(dIdx >= 0){
+      const today = new Date();
+      mlFilter = (r) => {
+        const dateObj = parseDateFlexible(r[dIdx]);
+        return classifyDispatch(dateObj, today) === "hoje";
+      };
+    }
+    const dIdxSh = parseInt(el("mapPedDespachoSh").value);
+    let shFilter = null;
+    if(dIdxSh >= 0){
+      const today = new Date();
+      shFilter = (r) => {
+        const dateObj = parseDateFlexible(r[dIdxSh]);
+        return classifyDispatch(dateObj, today) === "hoje";
+      };
+    }
+    addChannelToAgg(pedidosAgg, pedidosMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, "ML", mlFilter, el("mapPedCustoMl"));
+    addChannelToAgg(pedidosAgg, pedidosSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, "Shopee", shFilter, el("mapPedCustoSh"));
+    pedidosAgg = attachKitInfo(pedidosAgg);
+
+    pedidosAggOutros = buildOutrosAgg(pedidosMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, dIdx, el("mapPedCustoMl"), "ML");
+    pedidosAggOutros = attachKitInfo(pedidosAggOutros);
+
+    pedidosAggOutrosSh = buildOutrosAgg(pedidosSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, dIdxSh, el("mapPedCustoSh"), "Shopee");
+    pedidosAggOutrosSh = attachKitInfo(pedidosAggOutrosSh);
+
+    el("confirmTiny").scrollIntoView({behavior:"smooth", block:"center"});
+  });
+
+  setupDropzone(dzTiny, fileTiny, (data) => {
+    tiny = toHeadersRows(data);
+    fillSelect(mapTinySku, tiny.headers);
+    fillSelect(mapTinyDesc, tiny.headers);
+    fillSelect(mapTinySaldo, tiny.headers);
+    mapTinyFoto.innerHTML = "";
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "-1"; noneOpt.textContent = "— não usar foto —";
+    mapTinyFoto.appendChild(noneOpt);
+    tiny.headers.forEach((h, idx) => {
+      const opt = document.createElement("option");
+      opt.value = idx; opt.textContent = h || `Coluna ${idx+1}`;
+      mapTinyFoto.appendChild(opt);
+    });
+    autoGuess(mapTinySku, tiny.headers, ["sku","código","codigo","cod"]);
+    autoGuess(mapTinyDesc, tiny.headers, ["descr","produto","nome","item"]);
+    autoGuess(mapTinySaldo, tiny.headers, ["saldo","estoque","qtd","quantidade"]);
+    const fotoIdx = tiny.headers.findIndex(h => ["foto","imagem","imagen","image","url_imagem","link_imagem"].some(k => h.toLowerCase().includes(k)));
+    if(fotoIdx >= 0) mapTinyFoto.value = fotoIdx;
+    mapTinyArea.classList.remove("hidden");
+    dzTiny.classList.add("filled");
+    updateTinyPreview();
+    [mapTinySku, mapTinyDesc, mapTinySaldo, mapTinyFoto].forEach(sel => sel.onchange = updateTinyPreview);
+  });
+  function updateTinyPreview(){
+    const s = mapTinySku.value, d = mapTinyDesc.value, q = mapTinySaldo.value;
+    const sample = tiny.rows[0] || [];
+    previewNoteTiny.textContent = `Exemplo: SKU "${sample[s] ?? ""}" · "${sample[d] ?? ""}" · saldo ${sample[q] ?? ""}`;
+  }
+
+  el("confirmTiny").addEventListener("click", () => {
+    if(!pedidosAgg){
+      alert("Confirma os pedidos do dia primeiro (na aba Mercado Livre e/ou Shopee, botão \"Confirmar pedidos\") antes de cruzar com o saldo do Tiny.");
+      return;
+    }
+    const s = parseInt(mapTinySku.value), d = parseInt(mapTinyDesc.value), q = parseInt(mapTinySaldo.value);
+    const fIdx = parseInt(mapTinyFoto.value);
+    const useFoto = fIdx >= 0;
+
+    const tinyBySku = new Map();
+    const tinyByDesc = new Map();
+    tiny.rows.forEach(r => {
+      const skuRaw = String(r[s] ?? "").trim();
+      const descRaw = String(r[d] ?? "").trim();
+      const saldo = parseNum(r[q]);
+      const foto = useFoto ? String(r[fIdx] ?? "").trim() : "";
+      if(skuRaw && !tinyBySku.has(normSku(skuRaw))) tinyBySku.set(normSku(skuRaw), {sku:skuRaw, desc:descRaw, saldo, foto});
+      if(descRaw && !tinyByDesc.has(normDesc(descRaw))) tinyByDesc.set(normDesc(descRaw), {sku:skuRaw, desc:descRaw, saldo, foto});
+    });
+
+    function buildItem(p, key, extra){
+      extra = extra || {};
+      if(p.kitComponents && p.kitComponents.length){
+        const kitComponents = p.kitComponents.map(comp => {
+          const ckey = normSku(comp.sku);
+          let match = tinyBySku.get(ckey);
+          let matchedBy = match ? "sku" : null;
+          if(!match && comp.desc){
+            match = tinyByDesc.get(normDesc(comp.desc));
+            if(match) matchedBy = "descricao";
+          }
+          return {
+            sku: comp.sku,
+            desc: match ? match.desc : (comp.desc || ""),
+            saldoSistema: match ? match.saldo : null,
+            foto: match ? (match.foto || "") : "",
+            vendidoHoje: p.qtd * (comp.qty || 1),
+            contado: null,
+            isCounted: false,
+            matchedBy: matchedBy,
+            qtyByChannel: Object.fromEntries(Object.entries(p.qtyByChannel||{}).map(([ch,v]) => [ch, v*(comp.qty||1)]))
+          };
+        });
+        return Object.assign({
+          sku: p.sku,
+          desc: p.desc,
+          saldoSistema: null,
+          foto: "",
+          vendidoHoje: p.qtd,
+          contado: 0,
+          isCounted: false,
+          isExtra: false,
+          matchedBy: null,
+          kitComponents: kitComponents,
+          pedidoIds: p.pedidoIds || [],
+          channels: p.channels || [],
+          qtyByChannel: p.qtyByChannel || {},
+          custoUnitario: p.custoUnitario != null ? p.custoUnitario : null
+        }, extra);
+      }
+      let match = tinyBySku.get(key);
+      let matchedBy = match ? "sku" : null;
+      if(!match){
+        match = tinyByDesc.get(normDesc(p.desc));
+        if(match) matchedBy = "descricao";
+      }
+      return Object.assign({
+        sku: p.sku,
+        desc: match ? match.desc : p.desc,
+        saldoSistema: match ? match.saldo : null,
+        foto: match ? (match.foto || "") : "",
+        vendidoHoje: p.qtd,
+        contado: null,
+        isCounted: false,
+        isExtra: false,
+        matchedBy: matchedBy,
+        pedidoIds: p.pedidoIds || [],
+        channels: p.channels || [],
+        qtyByChannel: p.qtyByChannel || {},
+        custoUnitario: p.custoUnitario != null ? p.custoUnitario : null
+      }, extra);
+    }
+
+    // guarda o estado anterior de todos os itens (por SKU) pra não perder
+    // "já separado", contagem, observação etc. quando a planilha é reimportada —
+    // mesmo quando o pedido "muda de aba" (de outros dias pra hoje, no dia certo)
+    const previousBySku = new Map();
+    (state.items || []).forEach(prev => {
+      previousBySku.set(normSku(prev.sku), prev);
+    });
+
+    function carryOverState(item){
+      const prev = previousBySku.get(normSku(item.sku));
+      if(!prev) return item;
+      if(prev.separado){
+        item.separado = true;
+        item.jaEstavaSeparado = true;
+      }
+      if(prev.naoTem) item.naoTem = true;
+      if(prev.isCounted){
+        item.isCounted = true;
+        item.contado = prev.contado;
+      }
+      if(prev.observacao) item.observacao = prev.observacao;
+      if(prev.custoTotalOverride != null) item.custoTotalOverride = prev.custoTotalOverride;
+      return item;
+    }
+
+    const newItems = [];
+    pedidosAgg.forEach((p, key) => {
+      newItems.push(carryOverState(buildItem(p, key, { isOutrosDias: false })));
+    });
+
+    const newItemsOutros = [];
+    (pedidosAggOutros || new Map()).forEach((p, key) => {
+      newItemsOutros.push(carryOverState(buildItem(p, key, { isOutrosDias: true, dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null })));
+    });
+    (pedidosAggOutrosSh || new Map()).forEach((p, key) => {
+      newItemsOutros.push(carryOverState(buildItem(p, key, { isOutrosDias: true, dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null })));
+    });
+
+    const allItems = newItems.concat(newItemsOutros);
+    state.items = allItems;
+    save();
+    goToStep(2);
+    renderItems();
+
+    if(window.FB){
+      window.FB.publishSession(allItems, state.threshold).catch(err => {
+        console.error("Erro ao publicar sessão no Firestore", err);
+        alert("Cruzamento feito localmente, mas não consegui sincronizar com os outros celulares agora (sem internet?). Assim que a conexão voltar, tente de novo.");
+      });
+    }
+  });
+
+  function goToStep(n){
+    currentStep = n;
+    step1.classList.toggle("hidden", n!==1);
+    step2.classList.toggle("hidden", n!==2);
+    step3.classList.toggle("hidden", n!==3);
+    step4.classList.toggle("hidden", n!==4);
+    step5.classList.toggle("hidden", n!==5);
+    step6.classList.toggle("hidden", n!==6);
+    [pill1,pill2,pill3,pill4,pill5,pill6].forEach((p,i)=>{
+      p.classList.remove("active","done");
+      if(i+1 === n) p.classList.add("active");
+      else if(i+1 < n) p.classList.add("done");
+    });
+    renderFab();
+    updateHeader();
+  }
+  pill1.addEventListener("click", ()=> goToStep(1));
+  pill2.addEventListener("click", ()=> { if(state.items.length){ goToStep(2); renderItems(); } });
+  pill3.addEventListener("click", ()=> { if(state.items.length){ goToStep(3); renderItems(); } });
+  pill4.addEventListener("click", ()=> { if(state.items.length){ goToStep(4); renderSummary(); }});
+  pill5.addEventListener("click", ()=> { if(state.items.length){ goToStep(5); renderZerados(); }});
+  pill6.addEventListener("click", ()=> { if(state.items.length){ goToStep(6); renderRelatorioDia(); }});
+
+  function renderFab(){
+    fabBar.innerHTML = "";
+    fabBar.classList.add("hidden");
+    if(currentStep === 2 && state.items.length){
+      fabBar.classList.remove("hidden");
+      const b1 = document.createElement("button");
+      b1.className = "btn btn-ghost"; b1.textContent = "Salvar e sair";
+      b1.onclick = () => { save(); alert("Progresso salvo. Pode fechar e voltar depois."); };
+      const b2 = document.createElement("button");
+      b2.className = "btn btn-primary"; b2.textContent = "Contagem Shopee →";
+      b2.onclick = () => { goToStep(3); renderItems(); };
+      fabBar.appendChild(b1); fabBar.appendChild(b2);
+    }
+    if(currentStep === 3 && state.items.length){
+      fabBar.classList.remove("hidden");
+      const b1 = document.createElement("button");
+      b1.className = "btn btn-ghost"; b1.textContent = "← Voltar (Mercado Livre)";
+      b1.onclick = () => { goToStep(2); renderItems(); };
+      const b2 = document.createElement("button");
+      b2.className = "btn btn-primary"; b2.textContent = "Ver divergências →";
+      b2.onclick = () => { goToStep(4); renderSummary(); };
+      fabBar.appendChild(b1); fabBar.appendChild(b2);
+    }
+    if(currentStep === 4 && state.items.length){
+      fabBar.classList.remove("hidden");
+      const b1 = document.createElement("button");
+      b1.className = "btn btn-ghost"; b1.textContent = "← Voltar à contagem";
+      b1.onclick = () => { goToStep(3); renderItems(); };
+      const b2 = document.createElement("button");
+      b2.className = "btn btn-primary"; b2.textContent = "📤 Compartilhar resultado";
+      b2.onclick = exportCsv;
+      fabBar.appendChild(b1); fabBar.appendChild(b2);
+    }
+    if(currentStep === 5 && state.items.length){
+      fabBar.classList.remove("hidden");
+      const b1 = document.createElement("button");
+      b1.className = "btn btn-ghost"; b1.textContent = "← Voltar às divergências";
+      b1.onclick = () => { goToStep(4); renderSummary(); };
+      const b2 = document.createElement("button");
+      b2.className = "btn btn-primary"; b2.textContent = "Relatório do dia →";
+      b2.onclick = () => { goToStep(6); renderRelatorioDia(); };
+      fabBar.appendChild(b1); fabBar.appendChild(b2);
+    }
+    if(currentStep === 6 && state.items.length){
+      fabBar.classList.remove("hidden");
+      const b1 = document.createElement("button");
+      b1.className = "btn btn-ghost"; b1.textContent = "← Voltar à reposição";
+      b1.onclick = () => { goToStep(5); renderZerados(); };
+      fabBar.appendChild(b1);
+    }
+  }
+
+  function updateHeader(){
+    const hojeItems = state.items.filter(i => !i.isOutrosDias);
+    const counted = hojeItems.filter(i=>i.isCounted).length;
+    if(!hojeItems.length){ subLabel.textContent = "nenhuma contagem em andamento"; setGauge(null); return; }
+    subLabel.textContent = `${counted} / ${hojeItems.length} itens contados`;
+    const crit = hojeItems.filter(i => i.isCounted && divergenceStatus(i)==="crit").length;
+    const pct = hojeItems.length ? Math.round((counted/hojeItems.length)*100) : 0;
+    setGauge(pct, crit);
+  }
+
+  function setGauge(pct, critCount){
+    const pctEl = el("gaugePct");
+    const arc = el("gaugeArc");
+    const circumference = 138.2;
+    if(pct === null){ pctEl.textContent = "–"; arc.setAttribute("stroke-dashoffset", circumference); return; }
+    pctEl.textContent = pct + "%";
+    arc.setAttribute("stroke-dashoffset", circumference - (circumference*pct/100));
+    arc.setAttribute("stroke", critCount > 0 ? "#C0554A" : "#2F7A4D");
+  }
+
+  function setupFilterChips(containerEl, stateKey){
+    containerEl.querySelectorAll(".filter-chip").forEach(chip => {
+      chip.addEventListener("click", () => {
+        containerEl.querySelectorAll(".filter-chip").forEach(c=>c.classList.remove("active"));
+        chip.classList.add("active");
+        state[stateKey] = chip.dataset.filter;
+        renderItems();
+      });
+    });
+  }
+  setupFilterChips(el("filterChipsMl"), "filterMl");
+  setupFilterChips(el("filterChipsSh"), "filterSh");
+
+  searchBoxMl.addEventListener("input", () => { state.searchMl = searchBoxMl.value.toLowerCase(); renderItems(); });
+  searchBoxSh.addEventListener("input", () => { state.searchSh = searchBoxSh.value.toLowerCase(); renderItems(); });
+
+  let manualItemCounter = 0;
+  function addManualItem(channel, inputEl){
+    const nome = inputEl.value.trim();
+    if(!nome) return;
+    manualItemCounter++;
+    const newItem = {sku:`Novo pedido ${manualItemCounter}`, desc:nome, saldoSistema:0, foto:"", vendidoHoje:0, contado:0, isCounted:true, isExtra:true, matchedBy:null, channels:[channel], pedidoIds:[], _docSuffix:String(Date.now())};
+    state.items.push(newItem);
+    save(); renderItems(); updateHeader();
+    inputEl.value = "";
+    inputEl.focus();
+    if(window.FB){
+      window.FB.updateItem(newItem).catch(err => console.error("Erro ao sincronizar item novo", err));
+    }
+  }
+  const manualItemInputMl = el("manualItemInputMl"), manualItemInputSh = el("manualItemInputSh");
+  el("btnAddManualMl").addEventListener("click", () => addManualItem("ML", manualItemInputMl));
+  el("btnAddManualSh").addEventListener("click", () => addManualItem("Shopee", manualItemInputSh));
+  manualItemInputMl.addEventListener("keydown", (e) => { if(e.key === "Enter") addManualItem("ML", manualItemInputMl); });
+  manualItemInputSh.addEventListener("keydown", (e) => { if(e.key === "Enter") addManualItem("Shopee", manualItemInputSh); });
+
+  function resetSessionHandler(){
+    const ok = confirm("Isso vai apagar a contagem de HOJE pra todo mundo (todos os celulares) — mas os pedidos separados pra outros dias continuam guardados. Tem certeza que quer começar uma nova contagem do zero?");
+    if(!ok) return;
+    const proceed = () => {
+      state.items = state.items.filter(it => it.isOutrosDias);
+      state.filterMl = "all";
+      state.filterSh = "all";
+      state.searchMl = "";
+      state.searchSh = "";
+      searchBoxMl.value = "";
+      searchBoxSh.value = "";
+      searchBoxRelatorio.value = "";
+      save();
+      pedidosAgg = null;
+      pedidosAggOutros = null;
+      pedidosAggOutrosSh = null;
+      pedidosMl = null;
+      pedidosSh = null;
+      mapPedidosAreaMl.classList.add("hidden");
+      dzPedidosMl.classList.remove("filled");
+      mapPedidosAreaSh.classList.add("hidden");
+      dzPedidosSh.classList.remove("filled");
+      chStatusMl.textContent = "Ainda não importado.";
+      chStatusSh.textContent = "Ainda não importado.";
+      el("dispatchSplitNoteMl").textContent = "";
+      el("dispatchSplitNoteSh").textContent = "";
+      el("mlBucketTabHoje").classList.add("active"); el("mlBucketTabOutros").classList.remove("active");
+      el("mlBucketPanelHoje").classList.remove("hidden"); el("mlBucketPanelOutros").classList.add("hidden");
+      el("shBucketTabHoje").classList.add("active"); el("shBucketTabOutros").classList.remove("active");
+      el("shBucketPanelHoje").classList.remove("hidden"); el("shBucketPanelOutros").classList.add("hidden");
+      goToStep(1);
+    };
+    if(window.FB){
+      const itemsSnapshot = state.items.slice();
+      window.FB.archiveSession(itemsSnapshot).catch(err => {
+        console.error("Erro ao arquivar histórico (a contagem ainda será limpa)", err);
+      }).then(() => {
+        return window.FB.clearSession();
+      }).then(proceed).catch(err => {
+        console.error("Erro ao limpar sessão", err);
+        alert("Não consegui limpar a sessão compartilhada agora (sem internet?). Tente de novo em instantes.");
+      });
+    } else {
+      proceed();
+    }
+  }
+  el("btnResetSessionMl").addEventListener("click", resetSessionHandler);
+  el("btnResetSessionSh").addEventListener("click", resetSessionHandler);
+
+  function componentStatus(c){
+    if(!c.isCounted) return "pending";
+    if(c.saldoSistema === null) return "nomatch";
+    const diff = c.contado - c.saldoSistema;
+    if(diff === 0) return "ok";
+    if(Math.abs(diff) >= (state.threshold||1)) return "crit";
+    return "warn";
+  }
+
+  function divergenceStatus(item){
+    if(item.kitComponents && item.kitComponents.length){
+      const statuses = item.kitComponents.map(componentStatus);
+      if(statuses.some(s=>s==="crit")) return "crit";
+      if(statuses.some(s=>s==="nomatch")) return "nomatch";
+      if(statuses.some(s=>s==="warn")) return "warn";
+      if(statuses.every(s=>s==="ok")) return "ok";
+      return "pending";
+    }
+    if(!item.isCounted) return "pending";
+    if(item.saldoSistema === null) return "nomatch";
+    const diff = item.contado - item.saldoSistema;
+    if(diff === 0) return "ok";
+    if(Math.abs(diff) >= (state.threshold||1)) return "crit";
+    return "warn";
+  }
+
+  function worstDiffAbs(item){
+    if(item.kitComponents && item.kitComponents.length){
+      return Math.max(0, ...item.kitComponents.map(c => c.saldoSistema===null?0:Math.abs(c.contado-c.saldoSistema)));
+    }
+    return item.saldoSistema===null?0:Math.abs(item.contado-item.saldoSistema);
+  }
+
+  function filteredItems(channelLock, filterVal, searchVal, bucket){
+    return state.items.filter(it => {
+      const isOutros = !!it.isOutrosDias;
+      if(bucket === "outros" && !isOutros) return false;
+      if(bucket !== "outros" && isOutros) return false;
+      if(channelLock && !(it.channels||[]).includes(channelLock)) return false;
+      if(searchVal){
+        const hay = (it.sku + " " + it.desc).toLowerCase();
+        if(!hay.includes(searchVal)) return false;
+      }
+      if(filterVal === "pending") return !it.isCounted;
+      if(filterVal === "crit") return divergenceStatus(it) === "crit";
+      if(filterVal === "nomatch") return divergenceStatus(it) === "nomatch";
+      return true;
+    });
+  }
+
+  function renderItems(){
+    renderItemsInto(filteredItems("ML", state.filterMl, state.searchMl, "hoje"), itemListMl, emptyStateMl, "pedido");
+    renderItemsInto(filteredItems("Shopee", state.filterSh, state.searchSh, "hoje"), itemListSh, emptyStateSh, "pedido");
+    renderItemsInto(filteredItems("ML", "all", "", "outros"), itemListMlOutros, emptyStateMlOutros, "date");
+    renderItemsInto(filteredItems("Shopee", "all", "", "outros"), itemListShOutros, emptyStateShOutros, "date");
+  }
+
+  function renderItemsInto(items, itemList, emptyState, sortMode){
+    items = items.slice();
+    if(sortMode === "pedido"){
+      // agrupa itens que compartilham QUALQUER pedido em comum (não só o primeiro),
+      // usando union-find, e depois ordena os grupos em ordem alfabética
+      const n = items.length;
+      const parent = Array.from({length:n}, (_,i) => i);
+      function find(x){ while(parent[x]!==x){ parent[x]=parent[parent[x]]; x=parent[x]; } return x; }
+      function union(a,b){ const ra=find(a), rb=find(b); if(ra!==rb) parent[ra]=rb; }
+      const pedidoToIdx = new Map();
+      items.forEach((it, i) => {
+        (it.pedidoIds||[]).forEach(pid => {
+          const key = pid.replace(/^(ML|Shopee):\s*/i, "").replace(/[\s\u00A0]+/g, "").replace(/^#/, "").toUpperCase();
+          if(!key) return;
+          if(pedidoToIdx.has(key)) union(i, pedidoToIdx.get(key));
+          else pedidoToIdx.set(key, i);
+        });
+      });
+      const groups = new Map();
+      const itemToRoot = new Map();
+      items.forEach((it, i) => {
+        const root = find(i);
+        if(!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(it);
+        itemToRoot.set(it, root);
+      });
+      groups.forEach(arr => arr.sort((a,b) => (a.desc||"").localeCompare(b.desc||"", "pt-BR")));
+      const groupKeys = Array.from(groups.keys()).sort((ka,kb) => {
+        const da = groups.get(ka)[0].desc || "";
+        const db = groups.get(kb)[0].desc || "";
+        return da.localeCompare(db, "pt-BR");
+      });
+      items = [];
+      groupKeys.forEach(k => items.push(...groups.get(k)));
+      var pedidoGroupInfo = { groups, groupKeys, itemToRoot };
+    } else if(sortMode === "date"){
+      items.sort((a,b) => {
+        const da = a.dataDespacho ? new Date(a.dataDespacho) : null;
+        const db = b.dataDespacho ? new Date(b.dataDespacho) : null;
+        if(da && db) return da - db;
+        if(da) return -1;
+        if(db) return 1;
+        return (a.desc||"").localeCompare(b.desc||"", "pt-BR");
+      });
+    } else {
+      items.sort((a,b) => (a.desc||"").localeCompare(b.desc||"", "pt-BR"));
+    }
+    itemList.innerHTML = "";
+    emptyState.classList.toggle("hidden", items.length>0);
+
+    // itens adicionados manualmente ("novos pedidos") ficam juntos no topo da lista
+    const extras = items.filter(it => it.isExtra).sort((a,b) => (b._docSuffix||"").localeCompare(a._docSuffix||""));
+    const normalItems = items.filter(it => !it.isExtra);
+    items = extras.concat(normalItems);
+    if(extras.length){
+      const header = document.createElement("div");
+      header.className = "novos-pedidos-header";
+      header.textContent = "🆕 Novos pedidos";
+      itemList.appendChild(header);
+    }
+
+    // pra sortMode "pedido": as caixas visuais que juntam os itens do mesmo pedido são
+    // criadas "na hora", dentro do loop principal abaixo — assim elas aparecem na posição
+    // certa (depois dos itens que vêm antes delas, como os Novos Pedidos), não sempre primeiro.
+    const seenWrapper = new Map();
+
+    items.forEach((it) => {
+      const idx = state.items.indexOf(it);
+      const status = divergenceStatus(it);
+      const div = document.createElement("div");
+      const cls = it.naoTem ? "st-naotem" : (it.isExtra ? "st-extra" : "st-"+status);
+      div.className = "item " + cls;
+
+      const badgeClass = it.isExtra ? "badge-extra" : "badge-"+status;
+      const badgeText = it.isExtra ? "NÃO PREVISTO" :
+        status==="ok"?"OK": status==="crit"?"CRÍTICO": status==="warn"?"PEQUENA":
+        status==="nomatch"?"SEM SALDO":"PENDENTE";
+
+      const saldoTxt = it.saldoSistema === null
+        ? `<span style="color:var(--gray);">não encontrado no Tiny</span>`
+        : `<b>${it.saldoSistema}</b>`;
+
+      const isKit = it.kitComponents && it.kitComponents.length;
+
+      const bodyHtml = isKit ? `
+        <div class="item-body" style="flex-direction:column; align-items:stretch;">
+          <div class="sys-saldo"><span class="pedidos-alert">Vendido hoje: ${it.vendidoHoje||0}</span> (kit/par — ${it.kitComponents.length} componentes)${it.channels && it.channels.length ? `<br>Canal: <b>${it.channels.map(escapeHtml).join(", ")}</b>` : ""}${it.pedidoIds && it.pedidoIds.length ? `<br>Pedidos: ${it.pedidoIds.map(p => `<span class="pedidos-alert">${escapeHtml(p)}</span>`).join(", ")}` : ""}${it.dataDespacho ? `<br>Despacha em: <b>${formatDateBR(new Date(it.dataDespacho))}</b>` : ""}</div>
+          <div style="margin-top:6px;">
+            <div class="counter-label">Custo da peça (R$)</div>
+            <input type="number" step="0.01" inputmode="decimal" data-custo-total="1" value="${custoTotalValue(it)}" placeholder="0,00">
+          </div>
+          <div style="display:flex; gap:16px; margin-top:6px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--steel-700); cursor:pointer;">
+              <input type="checkbox" data-separado="1" ${it.separado ? "checked" : ""}> Já separado
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--steel-700); cursor:pointer;">
+              <input type="checkbox" data-nao-tem="1" ${it.naoTem ? "checked" : ""}> Não tem
+            </label>
+          </div>
+          ${it.jaEstavaSeparado ? `<div class="small-note" style="color:var(--green); margin-top:4px;">(pedido que já estava separado, não alterar)</div>` : ""}
+          ${it.kitComponents.map((c, ci) => {
+            const cSaldoTxt = c.saldoSistema === null
+              ? `<span style="color:var(--gray);">não encontrado no Tiny</span>`
+              : `<b>${c.saldoSistema}</b>`;
+            return `
+            <div class="kit-component" style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);">
+              <div class="item-desc" style="margin-bottom:4px;"><b>${escapeHtml(c.desc || "sem descrição")}</b> <span class="mono" style="color:var(--gray);">(${escapeHtml(c.sku)})</span></div>
+              <div class="sys-saldo">Vendido (via kit): <b>${c.vendidoHoje||0}</b><br>Sistema: ${cSaldoTxt}</div>
+              <div class="counter-label">Contagem manual</div>
+              <div class="counter">
+                <button data-comp-act="dec" data-comp-idx="${ci}">−</button>
+                <input type="number" inputmode="numeric" data-comp-idx="${ci}" value="${c.isCounted ? c.contado : ''}" placeholder="0">
+                <button data-comp-act="inc" data-comp-idx="${ci}">+</button>
+              </div>
+              <div class="counter-label" style="margin-top:8px;">Observação (opcional)</div>
+              <input type="text" class="obs-input" data-comp-obs-idx="${ci}" value="${escapeHtml(c.observacao||"")}" placeholder="Ex: caixa avariada, produto trocado...">
+              ${c.isCounted && c.saldoSistema !== null ? `<div class="item-diff">Diferença: <b>${c.contado - c.saldoSistema >= 0 ? "+" : ""}${c.contado - c.saldoSistema}</b></div>` : ""}
+            </div>`;
+          }).join("")}
+        </div>
+      ` : `
+        <div class="item-body">
+          <div class="sys-saldo">
+            <span class="pedidos-alert">Vendido hoje: ${it.vendidoHoje||0}</span><br>
+            Sistema: ${saldoTxt}
+            ${it.channels && it.channels.length ? `<br>Canal: <b>${it.channels.map(escapeHtml).join(", ")}</b>` : ""}
+            ${it.pedidoIds && it.pedidoIds.length ? `<br>Pedidos: ${it.pedidoIds.map(p => `<span class="pedidos-alert">${escapeHtml(p)}</span>`).join(", ")}` : ""}
+            ${it.dataDespacho ? `<br>Despacha em: <b>${formatDateBR(new Date(it.dataDespacho))}</b>` : ""}
+          </div>
+          <div style="margin-top:2px;">
+            <div class="counter-label">Custo da peça (R$)</div>
+            <input type="number" step="0.01" inputmode="decimal" data-custo-total="1" value="${custoTotalValue(it)}" placeholder="0,00">
+          </div>
+          <div style="display:flex; gap:16px; margin-top:6px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--steel-700); cursor:pointer;">
+              <input type="checkbox" data-separado="1" ${it.separado ? "checked" : ""}> Já separado
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--steel-700); cursor:pointer;">
+              <input type="checkbox" data-nao-tem="1" ${it.naoTem ? "checked" : ""}> Não tem
+            </label>
+          </div>
+          ${it.jaEstavaSeparado ? `<div class="small-note" style="color:var(--green); margin-top:4px;">(pedido que já estava separado, não alterar)</div>` : ""}
+          <div>
+            <div class="counter-label">Contagem manual</div>
+            <div class="counter">
+              <button data-act="dec">−</button>
+              <input type="number" inputmode="numeric" data-count="1" value="${it.isCounted ? it.contado : ''}" placeholder="0">
+              <button data-act="inc">+</button>
+            </div>
+            <div class="counter-label" style="margin-top:8px;">Observação (opcional)</div>
+            <input type="text" class="obs-input" data-obs="1" value="${escapeHtml(it.observacao||"")}" placeholder="Ex: caixa avariada, produto trocado...">
+          </div>
+        </div>
+        ${it.isCounted && it.saldoSistema !== null ? `<div class="item-diff">Diferença: <b>${it.contado - it.saldoSistema >= 0 ? "+" : ""}${it.contado - it.saldoSistema}</b></div>` : ""}
+      `;
+
+      div.innerHTML = `
+        <div class="item-top">
+          <div class="item-top-main">
+            ${it.foto ? `<img class="item-photo" src="${escapeHtml(it.foto)}" alt="" onerror="this.style.display='none'">` : ""}
+            <div>
+              <div class="item-sku">${escapeHtml(it.sku)}</div>
+              <div class="item-desc">${escapeHtml(it.desc || "sem descrição")}</div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="item-badge ${badgeClass}">${badgeText}</span>
+            <button type="button" data-delete-item="1" title="Excluir pedido" style="background:none; border:none; cursor:pointer; font-size:16px; line-height:1; padding:2px; color:var(--red);">🗑️</button>
+          </div>
+        </div>
+        ${bodyHtml}
+      `;
+
+      if(isKit){
+        div.querySelectorAll('[data-comp-act="dec"]').forEach(btn => {
+          const ci = parseInt(btn.dataset.compIdx);
+          btn.onclick = () => setKitComponentCount(idx, ci, (it.kitComponents[ci].isCounted?it.kitComponents[ci].contado:0) - 1);
+        });
+        div.querySelectorAll('[data-comp-act="inc"]').forEach(btn => {
+          const ci = parseInt(btn.dataset.compIdx);
+          btn.onclick = () => setKitComponentCount(idx, ci, (it.kitComponents[ci].isCounted?it.kitComponents[ci].contado:0) + 1);
+        });
+        div.querySelectorAll('input[data-comp-idx]').forEach(input => {
+          const ci = parseInt(input.dataset.compIdx);
+          input.addEventListener("change", () => setKitComponentCount(idx, ci, parseInt(input.value)||0));
+        });
+        div.querySelectorAll('input[data-comp-obs-idx]').forEach(input => {
+          const ci = parseInt(input.dataset.compObsIdx);
+          input.addEventListener("change", () => setKitComponentObs(idx, ci, input.value));
+        });
+      } else {
+        const input = div.querySelector('[data-count="1"]');
+        div.querySelector('[data-act="dec"]').onclick = () => setCount(idx, (it.isCounted?it.contado:0) - 1);
+        div.querySelector('[data-act="inc"]').onclick = () => setCount(idx, (it.isCounted?it.contado:0) + 1);
+        input.addEventListener("change", () => setCount(idx, parseInt(input.value)||0));
+        const obsInput = div.querySelector('[data-obs="1"]');
+        obsInput.addEventListener("change", () => setObservacao(idx, obsInput.value));
+      }
+
+      const separadoInput = div.querySelector('[data-separado="1"]');
+      if(separadoInput){
+        separadoInput.addEventListener("change", (e) => setSeparado(idx, e.target.checked));
+      }
+
+      const naoTemInput = div.querySelector('[data-nao-tem="1"]');
+      if(naoTemInput){
+        naoTemInput.addEventListener("change", (e) => {
+          div.classList.remove("st-ok","st-crit","st-warn","st-pending","st-extra","st-nomatch","st-naotem");
+          div.classList.add(e.target.checked ? "st-naotem" : (it.isExtra ? "st-extra" : "st-"+status));
+          setNaoTem(idx, e.target.checked);
+        });
+      }
+
+      const custoTotalInput = div.querySelector('[data-custo-total="1"]');
+      if(custoTotalInput){
+        custoTotalInput.addEventListener("change", (e) => setCustoTotal(idx, e.target.value));
+      }
+
+      const deleteBtn = div.querySelector('[data-delete-item="1"]');
+      if(deleteBtn){
+        deleteBtn.addEventListener("click", () => deleteItemAt(idx));
+      }
+
+      let container = itemList;
+      if(pedidoGroupInfo){
+        const root = pedidoGroupInfo.itemToRoot.get(it);
+        const arr = pedidoGroupInfo.groups.get(root);
+        if(arr && arr.length > 1){
+          if(!seenWrapper.has(root)){
+            const pedidosSet = new Set();
+            arr.forEach(x => (x.pedidoIds||[]).forEach(p => pedidosSet.add(p.replace(/^(ML|Shopee):\s*/, "").trim())));
+            const wrapper = document.createElement("div");
+            wrapper.className = "pedido-group";
+            wrapper.innerHTML = `<div class="pedido-group-header">📦 Mesmo pedido: <b>${escapeHtml(Array.from(pedidosSet).join(", "))}</b></div>`;
+            itemList.appendChild(wrapper);
+            seenWrapper.set(root, wrapper);
+          }
+          container = seenWrapper.get(root);
+        }
+      }
+      container.appendChild(div);
+    });
+  }
+
+  function deleteItemAt(idx){
+    const it = state.items[idx];
+    if(!it) return;
+    if(!confirm(`Excluir "${it.desc || it.sku}" da contagem? Isso não pode ser desfeito.`)) return;
+    const docId = window.FB ? window.FB.itemDocId(it.sku, it._docSuffix) : null;
+    state.items.splice(idx, 1);
+    save();
+    renderItems();
+    renderSummary();
+    renderZerados();
+    renderRelatorioDia();
+    updateHeader();
+    if(window.FB && docId){
+      window.FB.deleteItem(docId).catch(err => console.error("Erro ao apagar item no Firestore", err));
+    }
+  }
+
+  function setCustoTotal(idx, val){
+    const num = parseFloat(String(val).replace(",", "."));
+    state.items[idx].custoTotalOverride = isNaN(num) ? null : num;
+    save();
+    if(window.FB){
+      window.FB.updateItem(state.items[idx]).catch(err => console.error("Erro ao sincronizar custo total", err));
+    }
+  }
+
+  function setSeparado(idx, val){
+    state.items[idx].separado = val;
+    save();
+    if(window.FB){
+      window.FB.updateItem(state.items[idx]).catch(err => console.error("Erro ao sincronizar separação", err));
+    }
+  }
+
+  function setNaoTem(idx, val){
+    state.items[idx].naoTem = val;
+    save();
+    if(window.FB){
+      window.FB.updateItem(state.items[idx]).catch(err => console.error("Erro ao sincronizar 'não tem'", err));
+    }
+  }
+
+  function setKitComponentObs(itemIdx, compIdx, val){
+    const item = state.items[itemIdx];
+    item.kitComponents[compIdx].observacao = val.trim();
+    save();
+    if(window.FB){
+      window.FB.updateItem(item).catch(err => console.error("Erro ao sincronizar observação", err));
+    }
+  }
+
+  function setObservacao(idx, val){
+    state.items[idx].observacao = val.trim();
+    save();
+    if(window.FB){
+      window.FB.updateItem(state.items[idx]).catch(err => console.error("Erro ao sincronizar observação", err));
+    }
+  }
+
+  function setKitComponentCount(itemIdx, compIdx, val){
+    if(val < 0) val = 0;
+    const item = state.items[itemIdx];
+    item.kitComponents[compIdx].contado = val;
+    item.kitComponents[compIdx].isCounted = true;
+    item.isCounted = item.kitComponents.every(c => c.isCounted);
+    save();
+    renderItems();
+    updateHeader();
+    if(window.FB){
+      window.FB.updateItem(item).catch(err => console.error("Erro ao sincronizar item", err));
+    }
+  }
+
+  function setCount(idx, val){
+    if(val < 0) val = 0;
+    state.items[idx].contado = val;
+    state.items[idx].isCounted = true;
+    save();
+    renderItems();
+    updateHeader();
+    if(window.FB){
+      window.FB.updateItem(state.items[idx]).catch(err => console.error("Erro ao sincronizar item", err));
+    }
+  }
+
+  thresholdInput.addEventListener("change", () => {
+    state.threshold = parseInt(thresholdInput.value) || 1;
+    save();
+    renderSummary();
+    updateHeader();
+    if(window.FB){
+      window.FB.setThreshold(state.threshold).catch(err => console.error("Erro ao sincronizar limite", err));
+    }
+  });
+
+  function renderSummary(){
+    const hojeItems = state.items.filter(i => !i.isOutrosDias);
+    const counted = hojeItems.filter(i=>i.isCounted);
+    const ok = counted.filter(i=>divergenceStatus(i)==="ok").length;
+    const warn = counted.filter(i=>divergenceStatus(i)==="warn").length;
+    const crit = counted.filter(i=>divergenceStatus(i)==="crit").length;
+    const nomatch = counted.filter(i=>divergenceStatus(i)==="nomatch").length;
+    const pending = hojeItems.length - counted.length;
+
+    el("cntOk").textContent = ok;
+    el("cntWarn").textContent = warn;
+    el("cntCrit").textContent = crit;
+    el("cntPend").textContent = pending;
+    el("cntNomatch").textContent = nomatch;
+
+    const list = hojeItems
+      .filter(i => i.isCounted && divergenceStatus(i) !== "ok")
+      .sort((a,b) => {
+        const order = {crit:0, nomatch:1, warn:2};
+        const oa = order[divergenceStatus(a)] ?? 9, ob = order[divergenceStatus(b)] ?? 9;
+        if(oa !== ob) return oa-ob;
+        const da = worstDiffAbs(a);
+        const db = worstDiffAbs(b);
+        return db-da;
+      });
+
+    const container = el("divergenceList");
+    container.innerHTML = "";
+    if(!list.length){
+      container.innerHTML = `<div class="empty">Nenhuma divergência registrada até agora 🎉</div>`;
+      return;
+    }
+    list.forEach(it => {
+      const status = divergenceStatus(it);
+      const diff = it.saldoSistema===null ? null : (it.contado - it.saldoSistema);
+      const div = document.createElement("div");
+      div.className = "item " + (status==="crit"?"st-crit":status==="nomatch"?"st-nomatch":"st-warn");
+      const detailHtml = (it.kitComponents && it.kitComponents.length)
+        ? it.kitComponents.map(c => {
+            const cd = c.saldoSistema===null?null:(c.contado-c.saldoSistema);
+            return `<div class="item-diff" style="margin-top:6px;">${escapeHtml(c.desc||c.sku)} — Vendido: <b>${c.vendidoHoje||0}</b> · Sistema: <b>${c.saldoSistema===null?"—":c.saldoSistema}</b> · Contado: <b>${c.isCounted?c.contado:"—"}</b>${cd!==null?` · Diferença: <b>${cd>=0?"+":""}${cd}</b>`:""}${c.observacao?` · Obs: <b>${escapeHtml(c.observacao)}</b>`:""}</div>`;
+          }).join("") + (it.pedidoIds && it.pedidoIds.length ? `<div class="item-diff" style="margin-top:6px;">Pedidos: <b>${it.pedidoIds.map(escapeHtml).join(", ")}</b></div>` : "")
+        : `<div class="item-diff" style="margin-top:8px;">
+          Vendido: <b>${it.vendidoHoje||0}</b> · Sistema: <b>${it.saldoSistema===null?"—":it.saldoSistema}</b> · Contado: <b>${it.contado}</b>${diff!==null?` · Diferença: <b>${diff>=0?"+":""}${diff}</b>`:""}${it.pedidoIds && it.pedidoIds.length ? ` · Pedidos: <b>${it.pedidoIds.map(escapeHtml).join(", ")}</b>` : ""}${it.observacao?` · Obs: <b>${escapeHtml(it.observacao)}</b>`:""}
+        </div>`;
+      div.innerHTML = `
+        <div class="item-top">
+          <div>
+            <div class="item-sku">${escapeHtml(it.sku)}</div>
+            <div class="item-desc">${escapeHtml(it.desc || "sem descrição")}</div>
+          </div>
+          <span class="item-badge ${status==="crit"?"badge-crit":status==="nomatch"?"badge-nomatch":"badge-warn"}">${status==="crit"?"CRÍTICO":status==="nomatch"?"SEM SALDO":"PEQUENA"}</span>
+        </div>
+        ${detailHtml}
+      `;
+      container.appendChild(div);
+    });
+  }
+
+  function computeZerados(){
+    const out = [];
+    state.items.forEach(it => {
+      if(it.kitComponents && it.kitComponents.length){
+        it.kitComponents.forEach(c => {
+          if(c.isCounted && c.contado === 0){
+            out.push({ sku: c.sku, desc: c.desc, saldoSistema: c.saldoSistema, vendidoHoje: c.vendidoHoje || 0, isOutrosDias: !!it.isOutrosDias, dataDespacho: it.dataDespacho || null });
+          }
+        });
+        if(it.naoTem && !(it.isCounted && it.contado === 0)){
+          out.push({ sku: it.sku, desc: it.desc, saldoSistema: it.saldoSistema, vendidoHoje: it.vendidoHoje || 0, isOutrosDias: !!it.isOutrosDias, dataDespacho: it.dataDespacho || null, naoTem: true });
+        }
+      } else if(!it.isExtra && ((it.isCounted && it.contado === 0) || it.naoTem)){
+        out.push({ sku: it.sku, desc: it.desc, saldoSistema: it.saldoSistema, vendidoHoje: it.vendidoHoje || 0, isOutrosDias: !!it.isOutrosDias, dataDespacho: it.dataDespacho || null, naoTem: !!it.naoTem });
+      }
+    });
+    out.sort((a,b) => (b.vendidoHoje||0) - (a.vendidoHoje||0));
+    return out;
+  }
+
+  function renderZerados(){
+    const list = computeZerados();
+    zeradosList.innerHTML = "";
+    emptyStateZerados.classList.toggle("hidden", list.length>0);
+    list.forEach(it => {
+      const div = document.createElement("div");
+      div.className = "item st-crit";
+      const origemTxt = it.isOutrosDias
+        ? `Pedido de outro dia${it.dataDespacho ? ` (despacha em ${formatDateBR(new Date(it.dataDespacho))})` : ""}`
+        : "Vendido hoje";
+      div.innerHTML = `
+        <div class="item-top">
+          <div>
+            <div class="item-sku">${escapeHtml(it.sku)}</div>
+            <div class="item-desc">${escapeHtml(it.desc || "sem descrição")}</div>
+          </div>
+          <span class="item-badge badge-crit">${it.naoTem ? "NÃO TEM" : "ZERADO"}</span>
+        </div>
+        <div class="item-diff" style="margin-top:8px;">${origemTxt}: <b>${it.vendidoHoje}</b> · Saldo no sistema (antes da contagem): <b>${it.saldoSistema===null?"—":it.saldoSistema}</b></div>
+      `;
+      zeradosList.appendChild(div);
+    });
+  }
+
+  function computeRelatorioDia(){
+    const out = [];
+    state.items.filter(it => !it.isOutrosDias && !it.isExtra).forEach(it => {
+      if(it.kitComponents && it.kitComponents.length){
+        it.kitComponents.forEach(c => {
+          const estoqueAtual = c.isCounted ? c.contado : c.saldoSistema;
+          out.push({ sku: c.sku, desc: c.desc, estoqueAtual, divergente: c.isCounted && c.saldoSistema !== null && c.contado !== c.saldoSistema });
+        });
+      } else {
+        const estoqueAtual = it.isCounted ? it.contado : it.saldoSistema;
+        out.push({ sku: it.sku, desc: it.desc, estoqueAtual, divergente: it.isCounted && it.saldoSistema !== null && it.contado !== it.saldoSistema });
+      }
+    });
+    out.sort((a,b) => (a.desc||"").localeCompare(b.desc||"", "pt-BR"));
+    return out;
+  }
+
+  function renderRelatorioDia(){
+    const search = (searchBoxRelatorio.value||"").toLowerCase();
+    const list = computeRelatorioDia().filter(it => {
+      if(!search) return true;
+      return (it.sku+" "+it.desc).toLowerCase().includes(search);
+    });
+    relatorioList.innerHTML = "";
+    emptyStateRelatorio.classList.toggle("hidden", list.length>0);
+    list.forEach(it => {
+      const div = document.createElement("div");
+      const zerado = it.estoqueAtual === 0;
+      div.className = "disp-row" + (zerado ? " disp-row-alert" : "");
+      div.innerHTML = `
+        <div class="disp-main"><b>${escapeHtml(it.desc || it.sku)}</b> <span class="mono" style="color:var(--steel-700);">(${escapeHtml(it.sku)})</span>${it.divergente ? ` <span style="color:var(--red); font-size:11px;">(contagem manual)</span>` : ""}</div>
+        <div class="disp-date${zerado ? " disp-date-alert" : ""}">${zerado ? "⚠️ " : ""}${it.estoqueAtual===null||it.estoqueAtual===undefined ? "—" : it.estoqueAtual}</div>
+      `;
+      relatorioList.appendChild(div);
+    });
+  }
+  searchBoxRelatorio.addEventListener("input", renderRelatorioDia);
+
+  function exportCsv(){
+    const rows = [["SKU","Descrição","Vendido Hoje","Saldo Sistema","Contagem Manual","Diferença","Status","Cruzado por","Pedidos","Observação","Quando","Custo da Peça (R$)"]];
+    state.items.forEach(it => {
+      const pedidosTxt = (it.pedidoIds||[]).join("; ");
+      const quando = it.isOutrosDias ? `Outro dia${it.dataDespacho ? " ("+formatDateBR(new Date(it.dataDespacho))+")" : ""}` : "Hoje";
+      const custoPecaNum = it.custoTotalOverride != null ? it.custoTotalOverride : it.custoUnitario;
+      const custoPeca = custoPecaNum != null ? custoPecaNum.toFixed(2).replace(".",",") : "";
+      if(it.kitComponents && it.kitComponents.length){
+        it.kitComponents.forEach(c => {
+          const st = componentStatus(c);
+          const label = st==="ok"?"OK":st==="crit"?"CRITICO":st==="warn"?"PEQUENA":st==="nomatch"?"SEM_SALDO_TINY":"PENDENTE";
+          const diff = (c.isCounted && c.saldoSistema!==null) ? (c.contado - c.saldoSistema) : "";
+          rows.push([`${it.sku} > ${c.sku}`, c.desc, c.vendidoHoje||0, c.saldoSistema===null?"":c.saldoSistema, c.isCounted?c.contado:"", diff, label, c.matchedBy||"", pedidosTxt, c.observacao||"", quando, custoPeca]);
+        });
+        return;
+      }
+      const status = divergenceStatus(it);
+      const label = status==="ok"?"OK":status==="crit"?"CRITICO":status==="warn"?"PEQUENA":status==="nomatch"?"SEM_SALDO_TINY":"PENDENTE";
+      const diff = (it.isCounted && it.saldoSistema!==null) ? (it.contado - it.saldoSistema) : "";
+      rows.push([it.sku, it.desc, it.vendidoHoje||0, it.saldoSistema===null?"":it.saldoSistema, it.isCounted?it.contado:"", diff, label, it.matchedBy||"", pedidosTxt, it.observacao||"", quando, custoPeca]);
+    });
+    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const ts = new Date().toISOString().slice(0,10);
+    const filename = `conferencia_estoque_${ts}.csv`;
+    const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+
+    const file = new File([blob], filename, {type:"text/csv"});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      navigator.share({
+        files:[file],
+        title:"Conferência de Estoque",
+        text:`Resultado da contagem — ${ts}`
+      }).catch(()=>{ /* usuário cancelou o compartilhamento, sem problema */ });
+      return;
+    }
+
+    // fallback: download tradicional (desktop ou navegadores sem suporte a compartilhamento)
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function buildPdfReport(){
+    const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+    if(!jsPDFCtor){
+      alert("Não consegui carregar o gerador de PDF agora (sem internet?). Tente de novo.");
+      return null;
+    }
+    const doc = new jsPDFCtor({unit:"pt", format:"a4"});
+    const marginX = 40;
+    const pageHeight = doc.internal.pageSize.getHeight();
+    let y = 50;
+
+    function ensureSpace(lines){
+      if(y + lines*14 > pageHeight - 40){
+        doc.addPage();
+        y = 50;
+      }
+    }
+    function line(text, opts){
+      opts = opts || {};
+      doc.setFont(undefined, opts.bold ? "bold" : "normal");
+      doc.setFontSize(opts.size || 10);
+      ensureSpace(1);
+      doc.text(String(text), marginX, y);
+      y += opts.gap || 14;
+    }
+
+    const hojeItems = state.items.filter(i => !i.isOutrosDias);
+    const dataStr = new Date().toLocaleDateString("pt-BR");
+
+    line("Conferência de Estoque — AJ Bengoa", {bold:true, size:15, gap:20});
+    line(`Data: ${dataStr}`, {size:10, gap:18});
+
+    line("Resumo", {bold:true, size:12, gap:16});
+    const counted = hojeItems.filter(i=>i.isCounted);
+    const ok = counted.filter(i=>divergenceStatus(i)==="ok").length;
+    const warn = counted.filter(i=>divergenceStatus(i)==="warn").length;
+    const crit = counted.filter(i=>divergenceStatus(i)==="crit").length;
+    const nomatch = counted.filter(i=>divergenceStatus(i)==="nomatch").length;
+    const pending = hojeItems.length - counted.length;
+    line(`OK: ${ok}   Pequena: ${warn}   Crítica: ${crit}   Pendente: ${pending}   Sem saldo: ${nomatch}`, {gap:22});
+
+    const itensListados = hojeItems.filter(i => i.isCounted || i.separado || i.naoTem);
+    if(itensListados.length){
+      line("Itens separados e contados", {bold:true, size:12, gap:16});
+      itensListados.forEach(it => {
+        const diff = (it.isCounted && it.saldoSistema!==null) ? (it.contado - it.saldoSistema) : null;
+        ensureSpace(2);
+        line(`${it.sku} — ${it.desc||"sem descrição"} (${(it.channels||[]).join("/")||"—"})`, {bold:true, gap:13});
+        line(`  Vendido: ${it.vendidoHoje||0}  Sistema: ${it.saldoSistema===null?"—":it.saldoSistema}  Contado: ${it.isCounted?it.contado:"—"}${diff!==null?`  Diferença: ${diff>=0?"+":""}${diff}`:""}  Separado: ${it.separado?"Sim":"Não"}${it.naoTem?"  [NÃO TEM]":""}`, {gap:13});
+        if(it.observacao) line(`  Obs: ${it.observacao}`, {gap:14});
+      });
+      y += 6;
+    }
+
+    const naoTemItems = hojeItems.filter(i => i.naoTem);
+    if(naoTemItems.length){
+      line("Marcados como \"Não tem\"", {bold:true, size:12, gap:16});
+      naoTemItems.forEach(it => line(`${it.sku} — ${it.desc||"sem descrição"}`, {gap:14}));
+      y += 6;
+    }
+
+    const zerados = computeZerados();
+    if(zerados.length){
+      line("Reposição (zerados)", {bold:true, size:12, gap:16});
+      zerados.forEach(it => line(`${it.sku} — ${it.desc||"sem descrição"} (vendido: ${it.vendidoHoje})`, {gap:14}));
+    }
+
+    return doc.output("blob");
+  }
+
+  async function saveAndShareWhatsapp(noteEl){
+    const blob = buildPdfReport();
+    if(!blob) return;
+    const ts = new Date().toISOString().slice(0,10);
+    const filename = `conferencia_estoque_${ts}.pdf`;
+    const file = new File([blob], filename, {type:"application/pdf"});
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({
+          files:[file],
+          title:"Conferência de Estoque",
+          text:`Relatório da conferência — ${ts}`
+        });
+        if(noteEl) noteEl.textContent = "Relatório compartilhado.";
+      }catch(err){
+        if(noteEl) noteEl.textContent = "";
+      }
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    window.open(`https://wa.me/?text=${encodeURIComponent("Relatório da conferência de estoque de " + ts + " — anexa o PDF que acabou de baixar.")}`, "_blank");
+    if(noteEl) noteEl.textContent = "PDF baixado. O WhatsApp abriu numa aba — anexa o arquivo baixado na conversa.";
+  }
+
+  ["btnSaveWhatsapp"].forEach(id => {
+    const btn = el(id);
+    if(!btn) return;
+    btn.addEventListener("click", () => saveAndShareWhatsapp(el(id.replace("btnSaveWhatsapp","whatsappStatusNote"))));
+  });
+
+  async function saveAndShareLinkWhatsapp(noteEl){
+    const link = location.origin + location.pathname + "#relatorio";
+    const text = `Relatório do Dia — Conferência de Estoque: ${link}`;
+    if(navigator.share){
+      try{
+        await navigator.share({ title:"Relatório do Dia", text, url:link });
+        if(noteEl) noteEl.textContent = "Link compartilhado.";
+      }catch(err){
+        if(noteEl) noteEl.textContent = "";
+      }
+      return;
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+    if(noteEl) noteEl.textContent = "WhatsApp aberto numa aba com o link do relatório.";
+  }
+  el("btnSaveWhatsappMl").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteMl")));
+  el("btnSaveWhatsappSh").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteSh")));
+  el("btnSaveWhatsappRel").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteRel")));
+
+  if(location.hash === "#relatorio" && state.items.length){
+    goToStep(6);
+    renderRelatorioDia();
+  } else {
+    goToStep(1);
+  }
+})();
+
+</script>
+<script>
+(function(){
+  "use strict";
+
+  function el(id){ return document.getElementById(id); }
+  function escapeHtml(s){
+    return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  let historyDocs = null;
+  let loading = false;
+
+  async function ensureLoaded(){
+    if(historyDocs !== null || loading) return;
+    if(!window.FB){
+      el("hist_statusText").textContent = "Conectando ao banco…";
+      window.addEventListener("fb-ready", () => ensureLoaded(), {once:true});
+      return;
+    }
+    loading = true;
+    el("hist_statusText").textContent = "Carregando histórico…";
+    try{
+      historyDocs = await window.FB.loadHistory();
+      populateMonthSelect();
+      renderAll();
+    }catch(err){
+      console.error("Erro ao carregar histórico", err);
+      el("hist_statusText").textContent = "Não consegui carregar o histórico agora (sem internet?).";
+    }
+    loading = false;
+  }
+
+  function monthsAvailable(){
+    const set = new Set();
+    (historyDocs||[]).forEach(d => { if(d.date) set.add(d.date.slice(0,7)); });
+    return Array.from(set).sort().reverse();
+  }
+
+  function monthLabel(m){
+    const [y, mo] = m.split("-");
+    const nomes = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"];
+    return `${nomes[parseInt(mo)-1]} de ${y}`;
+  }
+
+  function populateMonthSelect(){
+    const sel = el("hist_monthSelect");
+    const months = monthsAvailable();
+    const currentMonth = new Date().toISOString().slice(0,7);
+    sel.innerHTML = "";
+    if(!months.length){
+      const opt = document.createElement("option");
+      opt.value = currentMonth; opt.textContent = monthLabel(currentMonth) + " (sem dados ainda)";
+      sel.appendChild(opt);
+      return;
+    }
+    months.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m; opt.textContent = monthLabel(m);
+      sel.appendChild(opt);
+    });
+  }
+
+  function docsForSelectedMonth(){
+    const month = el("hist_monthSelect").value;
+    return (historyDocs||[]).filter(d => d.date && d.date.startsWith(month));
+  }
+
+  function flattenItems(docs){
+    const flat = [];
+    docs.forEach(doc => {
+      (doc.items||[]).forEach(it => {
+        if(it.kitComponents && it.kitComponents.length){
+          it.kitComponents.forEach(c => {
+            flat.push({
+              sku: c.sku, desc: c.desc,
+              qtyByChannel: c.qtyByChannel || {},
+              saldoSistema: c.saldoSistema,
+              contado: (c.isCounted===false) ? null : c.contado
+            });
+          });
+        } else {
+          flat.push({
+            sku: it.sku, desc: it.desc,
+            qtyByChannel: it.qtyByChannel || {},
+            saldoSistema: it.saldoSistema,
+            contado: (it.isCounted===false) ? null : it.contado
+          });
+        }
+      });
+    });
+    return flat;
+  }
+
+  function topSellers(flat, channel, limit){
+    const byKey = new Map();
+    flat.forEach(r => {
+      const qty = (r.qtyByChannel||{})[channel] || 0;
+      if(!qty) return;
+      const key = r.sku + "||" + r.desc;
+      if(byKey.has(key)) byKey.get(key).qty += qty;
+      else byKey.set(key, {sku:r.sku, desc:r.desc, qty});
+    });
+    return Array.from(byKey.values()).sort((a,b)=>b.qty-a.qty).slice(0, limit||10);
+  }
+
+  function topDivergences(flat, limit){
+    const byKey = new Map();
+    flat.forEach(r => {
+      if(r.contado === null || r.contado === undefined) return;
+      if(r.saldoSistema === null || r.saldoSistema === undefined) return;
+      const diff = Math.abs(r.contado - r.saldoSistema);
+      if(!diff) return;
+      const key = r.sku + "||" + r.desc;
+      if(byKey.has(key)) byKey.get(key).diff += diff;
+      else byKey.set(key, {sku:r.sku, desc:r.desc, diff});
+    });
+    return Array.from(byKey.values()).sort((a,b)=>b.diff-a.diff).slice(0, limit||10);
+  }
+
+  function renderBarList(container, rows, valueKey, warnColor){
+    container.innerHTML = "";
+    if(!rows.length){
+      container.innerHTML = `<div class="empty">Sem dados nesse mês.</div>`;
+      return;
+    }
+    const max = Math.max(...rows.map(r => r[valueKey]));
+    rows.forEach(r => {
+      const pct = max ? Math.round((r[valueKey]/max)*100) : 0;
+      const row = document.createElement("div");
+      row.className = "hbar-row";
+      row.innerHTML = `
+        <div class="hbar-label"><span>${escapeHtml(r.desc || r.sku)} <span class="mono" style="color:var(--steel-700);">(${escapeHtml(r.sku)})</span></span><span class="n">${r[valueKey]}</span></div>
+        <div class="hbar-track"><div class="hbar-fill${warnColor?' warn':''}" style="width:${pct}%;"></div></div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  function renderAll(){
+    const docs = docsForSelectedMonth();
+    const flat = flattenItems(docs);
+    el("hist_statusText").textContent = docs.length
+      ? `${docs.length} contagem(ns) arquivada(s) nesse mês.`
+      : "Nenhuma contagem arquivada nesse mês ainda — o histórico é gravado toda vez que você usa \"Encerrar contagem\" na Conferência de Estoque.";
+    renderBarList(el("hist_topMl"), topSellers(flat, "ML", 10), "qty", false);
+    renderBarList(el("hist_topSh"), topSellers(flat, "Shopee", 10), "qty", false);
+    renderBarList(el("hist_topDiverg"), topDivergences(flat, 10), "diff", true);
+  }
+
+  el("hist_monthSelect").addEventListener("change", renderAll);
+
+  el("hist_btnDeleteMonth").addEventListener("click", () => {
+    const month = el("hist_monthSelect").value;
+    if(!confirm(`Apagar todo o histórico de ${monthLabel(month)}? Isso não pode ser desfeito.`)) return;
+    if(!window.FB) return;
+    window.FB.deleteHistoryByMonth(month).then((count) => {
+      alert(`${count||0} registro(s) apagado(s).`);
+      historyDocs = null;
+      ensureLoaded();
+    }).catch(err => {
+      console.error("Erro ao apagar histórico do mês", err);
+      alert("Não consegui apagar agora (sem internet?). Tente de novo.");
+    });
+  });
+
+  el("hist_btnDeleteAll").addEventListener("click", () => {
+    if(!confirm("Apagar TODO o histórico, de todos os meses? Isso não pode ser desfeito.")) return;
+    if(!window.FB) return;
+    window.FB.deleteAllHistory().then(() => {
+      alert("Histórico apagado.");
+      historyDocs = null;
+      ensureLoaded();
+    }).catch(err => {
+      console.error("Erro ao apagar todo o histórico", err);
+      alert("Não consegui apagar agora (sem internet?). Tente de novo.");
+    });
+  });
+
+  window.HistTool = {
+    refresh(){
+      historyDocs = null;
+      ensureLoaded();
+    }
+  };
+})();
+</script>
+<script>
+(function(){
+  const btnConf = document.getElementById("tabBtnConf");
+  const btnHist = document.getElementById("tabBtnHist");
+  const tabConf = document.getElementById("tab-conf");
+  const tabHist = document.getElementById("tab-hist");
+  function activate(btn, tab){
+    [btnConf,btnHist].forEach(b=>b.classList.remove("active"));
+    [tabConf,tabHist].forEach(t=>t.classList.add("hidden"));
+    btn.classList.add("active");
+    tab.classList.remove("hidden");
+  }
+  btnConf.addEventListener("click", () => activate(btnConf, tabConf));
+  btnHist.addEventListener("click", () => { activate(btnHist, tabHist); if(window.HistTool) window.HistTool.refresh(); });
+})();
+</script>
+</body>
+</html>
