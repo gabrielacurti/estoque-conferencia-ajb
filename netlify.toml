@@ -1,0 +1,12 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/tiny-auth"
+  to = "/.netlify/functions/tiny-auth"
+  status = 200
+
+[[redirects]]
+  from = "/api/tiny-callback"
+  to = "/.netlify/functions/tiny-callback"
+  status = 200

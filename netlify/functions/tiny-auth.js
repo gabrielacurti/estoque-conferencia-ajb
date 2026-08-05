@@ -1,5 +1,3 @@
-// Inicia o login OAuth2 com o Tiny.
-// Acesse /api/tiny-auth pra começar a conexão.
 exports.handler = async (event) => {
   const clientId = process.env.TINY_CLIENT_ID;
   if (!clientId) {
