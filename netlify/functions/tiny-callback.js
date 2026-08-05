@@ -47,7 +47,11 @@ exports.handler = async (event) => {
   }
 
   try {
-    const store = getStore("tiny-tokens");
+    const store = getStore({
+      name: "tiny-tokens",
+      siteID: process.env.SITE_ID,
+      token: process.env.NETLIFY_BLOBS_TOKEN
+    });
     await store.setJSON("tokens", {
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
