@@ -1,6 +1,9 @@
 [build]
   functions = "netlify/functions"
 
+[build.environment]
+  SECRETS_SCAN_OMIT_PATHS = "index.html"
+
 [[redirects]]
   from = "/api/tiny-auth"
   to = "/.netlify/functions/tiny-auth"
