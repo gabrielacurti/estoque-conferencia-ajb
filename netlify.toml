@@ -18,3 +18,8 @@
   from = "/api/tiny-pedidos"
   to = "/.netlify/functions/tiny-pedidos"
   status = 200
+
+[[redirects]]
+  from = "/api/tiny-estoque"
+  to = "/.netlify/functions/tiny-estoque"
+  status = 200
