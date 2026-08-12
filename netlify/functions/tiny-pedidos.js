@@ -33,19 +33,30 @@ exports.handler = async (event) => {
     listUrl.searchParams.set("limit", String(PAGE_SIZE));
     listUrl.searchParams.set("offset", String(offset));
 
-    let listResp, listData;
+    let listResp, listData, listRawText;
     try {
       listResp = await fetch(listUrl.toString(), {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
-      listData = await listResp.json();
+      listRawText = await listResp.text();
     } catch (err) {
-      return jsonResponse(500, { error: "Erro ao listar pedidos.", detail: String(err) });
+      return jsonResponse(500, { error: "Erro ao listar pedidos (conexão).", detail: String(err) });
     }
-    if (!listResp.ok) {
-      return jsonResponse(listResp.status, {
+    if (listRawText) {
+      try {
+        listData = JSON.parse(listRawText);
+      } catch (parseErr) {
+        return jsonResponse(502, {
+          error: "A API do Tiny devolveu uma resposta que não é JSON válido ao listar pedidos.",
+          status: listResp.status,
+          detail: listRawText.slice(0, 500)
+        });
+      }
+    }
+    if (!listResp.ok || !listData) {
+      return jsonResponse(listResp.status || 500, {
         error: "A API do Tiny retornou um erro ao listar pedidos.",
-        detail: listData
+        detail: listData || (listRawText ? listRawText.slice(0, 500) : "(resposta vazia)")
       });
     }
 
