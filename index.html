@@ -433,13 +433,14 @@
 
     <div class="card" id="cardTiny">
       <h2>1. Importar saldo do Tiny</h2>
-      <div class="hint">O relatório de saldo em estoque (Tiny) é o mesmo pra Mercado Livre e Shopee — importa aqui uma vez só. Vou cruzar cada produto vendido hoje com o saldo dele, primeiro pelo SKU e, se não encontrar, pela descrição.</div>
+      <div class="hint">O saldo em estoque do Tiny é buscado automaticamente, cruzando cada produto vendido hoje com o saldo dele.</div>
 
-      <div class="dropzone" id="dzTiny">
+      <div class="dropzone hidden" id="dzTiny">
         <div class="icon">📄</div>
         <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX exportado do Tiny</div>
         <input type="file" id="fileTiny" accept=".csv,.xlsx,.xls">
       </div>
+      <div class="small-note">O saldo é buscado automaticamente na etapa de baixo, depois de confirmar os pedidos (botão "🔄 Buscar saldo do Tiny automaticamente e cruzar").</div>
 
       <div id="mapTinyArea" class="hidden" style="margin-top:16px;">
         <div class="field">
@@ -466,11 +467,11 @@
 
     <div class="card" id="cardPedidos">
       <h2>2. Importar pedidos do dia</h2>
-      <div class="hint">Exporte os relatórios de pedidos/vendas de hoje de cada canal. Só os produtos que aparecerem aqui vão entrar na contagem.</div>
+      <div class="hint">Só os produtos que aparecerem aqui vão entrar na contagem.</div>
 
       <button class="btn btn-primary btn-block" id="btnBuscarTinyPedidos" style="margin-top:10px;">🔄 Buscar pedidos de hoje do Tiny (automático)</button>
       <div class="small-note" id="tinyPedidosStatusNote" style="margin-top:6px; margin-bottom:6px;"></div>
-      <div class="small-note" style="margin-bottom:10px;">Isso já preenche os dois canais abaixo sozinho. Se preferir, ainda dá pra importar a planilha manualmente como sempre.</div>
+      <div class="small-note" style="margin-bottom:10px;">Isso já preenche os dois canais abaixo sozinho.</div>
 
       <div style="display:flex; gap:8px; margin-top:10px;">
         <button type="button" class="step-pill active" id="chTabMl" style="cursor:pointer; border:none;">Mercado Livre</button>
@@ -479,7 +480,7 @@
 
       <div id="chPanelMl" style="margin-top:12px;">
         <div class="small-note" id="chStatusMl">Ainda não importado.</div>
-        <div class="dropzone" id="dzPedidosMl">
+        <div class="dropzone hidden" id="dzPedidosMl">
           <div class="icon">🧾</div>
           <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX de pedidos do Mercado Livre</div>
           <input type="file" id="filePedidosMl" accept=".csv,.xlsx,.xls">
@@ -518,7 +519,7 @@
 
       <div id="chPanelSh" class="hidden" style="margin-top:12px;">
         <div class="small-note" id="chStatusSh">Ainda não importado.</div>
-        <div class="dropzone" id="dzPedidosSh">
+        <div class="dropzone hidden" id="dzPedidosSh">
           <div class="icon">🧾</div>
           <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX de pedidos da Shopee</div>
           <input type="file" id="filePedidosSh" accept=".csv,.xlsx,.xls">
@@ -558,6 +559,10 @@
       <div class="small-note" style="margin-top:12px;">Se o mesmo SKU aparecer em vários pedidos (do mesmo canal ou dos dois juntos), o app soma tudo automaticamente e junta os números dos pedidos na mesma linha, marcando de qual canal veio cada um.</div>
       <button class="btn btn-primary btn-block" id="confirmPedidos" style="margin-top:10px;">Confirmar pedidos</button>
     </div>
+
+    <button class="btn btn-primary btn-block" id="btnBuscarTinySaldo" style="margin-bottom:8px;">🔄 Buscar saldo do Tiny automaticamente e cruzar</button>
+    <div class="small-note" id="tinySaldoStatusNote" style="margin-bottom:10px;"></div>
+    <div class="small-note" style="margin-bottom:10px;">Precisa confirmar os pedidos acima primeiro. Se preferir, ainda dá pra usar a planilha de saldo importada em "1. Importar saldo do Tiny".</div>
 
     <button class="btn btn-primary btn-block" id="confirmTiny" style="margin-bottom:16px;">Cruzar e iniciar contagem</button>
 
@@ -1114,10 +1119,14 @@
       btnBuscarTinyPedidos.disabled = true;
       try{
         const resp = await fetch("/api/tiny-pedidos");
-        const data = await resp.json();
-        if(!resp.ok){
-          noteEl.textContent = "Erro: " + (data.error || "não consegui buscar os pedidos.");
-          console.error("Erro ao buscar pedidos do Tiny", data);
+        const rawText = await resp.text();
+        let data = null;
+        if(rawText){
+          try{ data = JSON.parse(rawText); }catch(parseErr){ data = null; }
+        }
+        if(!resp.ok || !data){
+          noteEl.textContent = `Erro (status ${resp.status}): ` + (data && data.error ? data.error : "resposta vazia ou inválida do servidor. Tenta de novo em alguns segundos.");
+          console.error("Erro ao buscar pedidos do Tiny", {status: resp.status, rawText: rawText.slice(0,500)});
           return;
         }
         const linhas = data.linhas || [];
@@ -1291,8 +1300,8 @@
     el("confirmTiny").scrollIntoView({behavior:"smooth", block:"center"});
   });
 
-  setupDropzone(dzTiny, fileTiny, (data) => {
-    tiny = toHeadersRows(data);
+  function applyParsedTiny(parsed){
+    tiny = parsed;
     fillSelect(mapTinySku, tiny.headers);
     fillSelect(mapTinyDesc, tiny.headers);
     fillSelect(mapTinySaldo, tiny.headers);
@@ -1314,6 +1323,9 @@
     dzTiny.classList.add("filled");
     updateTinyPreview();
     [mapTinySku, mapTinyDesc, mapTinySaldo, mapTinyFoto].forEach(sel => sel.onchange = updateTinyPreview);
+  }
+  setupDropzone(dzTiny, fileTiny, (data) => {
+    applyParsedTiny(toHeadersRows(data));
   });
   function updateTinyPreview(){
     const s = mapTinySku.value, d = mapTinyDesc.value, q = mapTinySaldo.value;
@@ -1321,9 +1333,13 @@
     previewNoteTiny.textContent = `Exemplo: SKU "${sample[s] ?? ""}" · "${sample[d] ?? ""}" · saldo ${sample[q] ?? ""}`;
   }
 
-  el("confirmTiny").addEventListener("click", () => {
+  function doCruzar(){
     if(!pedidosAgg){
       alert("Confirma os pedidos do dia primeiro (na aba Mercado Livre e/ou Shopee, botão \"Confirmar pedidos\") antes de cruzar com o saldo do Tiny.");
+      return;
+    }
+    if(!tiny){
+      alert("Importa o saldo do Tiny primeiro (arquivo, ou o botão de busca automática) antes de cruzar.");
       return;
     }
     const s = parseInt(mapTinySku.value), d = parseInt(mapTinyDesc.value), q = parseInt(mapTinySaldo.value);
@@ -1406,20 +1422,32 @@
       }, extra);
     }
 
-    // guarda o estado anterior SÓ dos itens que estavam em "outros dias" (por SKU),
-    // pra não perder "já separado"/contagem quando o pedido "muda de aba" no dia certo.
-    // Itens que já estavam em "hoje" antes NÃO entram aqui — se entrassem, uma
-    // planilha reimportada sem clicar em "Encerrar contagem" herdaria contagem
-    // de um dia passado, fazendo parecer que um item já foi contado sem ter sido.
-    const previousBySku = new Map();
+    // guarda o estado anterior SÓ dos itens que estavam em "outros dias", indexados
+    // pelo ID DA VENDA (não pelo SKU) — assim, se o mesmo produto aparecer numa
+    // venda nova e diferente, não confunde com uma venda antiga já separada.
+    // Isso também é o que faz um pedido "sair" de outros dias sozinho quando chega
+    // o dia do despacho: ele reaparece com o mesmo ID em "hoje", carrega o estado,
+    // e como o build de hoje não inclui mais os itens de outros dias antigos, ele
+    // não aparece duas vezes.
+    const previousByPedidoId = new Map();
     (state.items || []).forEach(prev => {
-      if(prev.isOutrosDias){
-        previousBySku.set(normSku(prev.sku), prev);
+      if(prev.isOutrosDias && prev.pedidoIds && prev.pedidoIds.length){
+        prev.pedidoIds.forEach(pid => {
+          if(!previousByPedidoId.has(pid)) previousByPedidoId.set(pid, prev);
+        });
       }
     });
 
     function carryOverState(item){
-      const prev = previousBySku.get(normSku(item.sku));
+      let prev = null;
+      if(item.pedidoIds && item.pedidoIds.length){
+        for(const pid of item.pedidoIds){
+          if(previousByPedidoId.has(pid)){
+            prev = previousByPedidoId.get(pid);
+            break;
+          }
+        }
+      }
       if(!prev) return item;
       if(prev.separado){
         item.separado = true;
@@ -1457,7 +1485,58 @@
         alert("Cruzamento feito localmente, mas não consegui sincronizar com os outros celulares agora (sem internet?). Assim que a conexão voltar, tente de novo.");
       });
     }
-  });
+  }
+  el("confirmTiny").addEventListener("click", doCruzar);
+
+  const btnBuscarTinySaldo = el("btnBuscarTinySaldo");
+  if(btnBuscarTinySaldo){
+    btnBuscarTinySaldo.addEventListener("click", async () => {
+      const noteEl = el("tinySaldoStatusNote");
+      if(!pedidosAgg){
+        alert("Confirma os pedidos do dia primeiro (\"Confirmar pedidos\") antes de buscar o saldo.");
+        return;
+      }
+      const skus = Array.from(pedidosAgg.values()).map(p => p.sku).filter(Boolean);
+      if(!skus.length){
+        noteEl.textContent = "Nenhum SKU pra buscar (confirma os pedidos primeiro).";
+        return;
+      }
+      noteEl.textContent = `Buscando saldo de ${skus.length} SKU(s) no Tiny...`;
+      btnBuscarTinySaldo.disabled = true;
+      try{
+        const resp = await fetch("/api/tiny-estoque?skus=" + encodeURIComponent(skus.join(",")));
+        const rawText = await resp.text();
+        let data = null;
+        if(rawText){
+          try{ data = JSON.parse(rawText); }catch(parseErr){ data = null; }
+        }
+        if(!resp.ok || !data){
+          noteEl.textContent = `Erro (status ${resp.status}): ` + (data && data.error ? data.error : "resposta vazia ou inválida do servidor. Tenta de novo em alguns segundos.");
+          console.error("Erro ao buscar saldo do Tiny", {status: resp.status, rawText: rawText.slice(0,500)});
+          return;
+        }
+        const resultados = data.resultados || [];
+        const encontrados = resultados.filter(r => r.encontrado);
+        if(!encontrados.length){
+          noteEl.textContent = "Nenhum desses SKUs foi encontrado no Tiny.";
+          return;
+        }
+        const headers = ["SKU","Descrição","Saldo","Foto"];
+        const rows = encontrados.map(r => [r.sku, r.nome || r.sku, r.disponivel != null ? r.disponivel : r.saldo, r.foto || ""]);
+        applyParsedTiny({headers, rows});
+        mapTinyFoto.value = "3"; // coluna "Foto" (índice 3) — a foto vem pronta da API
+        updateTinyPreview();
+        const naoEncontrados = resultados.length - encontrados.length;
+        noteEl.textContent = `Pronto! ${encontrados.length} SKU(s) encontrado(s).${naoEncontrados ? ` ${naoEncontrados} não encontrado(s) no Tiny.` : ""} Cruzando...`;
+        doCruzar();
+      }catch(err){
+        console.error("Erro ao buscar saldo do Tiny", err);
+        noteEl.textContent = "Erro ao buscar saldo: " + err.message;
+      }finally{
+        btnBuscarTinySaldo.disabled = false;
+      }
+    });
+  }
 
   function goToStep(n){
     currentStep = n;
