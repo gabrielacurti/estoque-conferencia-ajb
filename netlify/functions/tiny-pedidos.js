@@ -12,7 +12,7 @@ exports.handler = async (event) => {
   }
 
   const params = event.queryStringParameters || {};
-  const hoje = new Date().toISOString().slice(0, 10);
+  const hoje = hojeBrasil();
   const dataInicial = params.dataInicial || hoje;
   const dataFinal = params.dataFinal || hoje;
 
@@ -49,4 +49,16 @@ function jsonResponse(statusCode, obj) {
     },
     body: JSON.stringify(obj, null, 2)
   };
+}
+
+// o servidor da function roda em UTC — calcula "hoje" pelo horário de
+// Brasília, senão à noite ela pede pedidos de "amanhã" (ainda não existem)
+function hojeBrasil() {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return fmt.format(new Date());
 }
