@@ -3,7 +3,7 @@
 // uma linha por produto vendido, pronta pra alimentar o app direto.
 //
 // Acesse /api/tiny-pedidos (aceita ?dataInicial=YYYY-MM-DD&dataFinal=YYYY-MM-DD,
-// senão usa hoje pros dois).
+// senão usa os últimos 7 dias até hoje).
 const { getValidAccessToken } = require("./tiny-token-helper");
 
 exports.handler = async (event) => {
@@ -19,32 +19,47 @@ exports.handler = async (event) => {
 
   const params = event.queryStringParameters || {};
   const hoje = hojeBrasil();
-  const dataInicial = params.dataInicial || hoje;
+  const dataInicial = params.dataInicial || diasAtrasBrasil(7);
   const dataFinal = params.dataFinal || hoje;
 
-  const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
-  listUrl.searchParams.set("dataInicial", dataInicial);
-  listUrl.searchParams.set("dataFinal", dataFinal);
-  listUrl.searchParams.set("limit", params.limit || "100");
-  listUrl.searchParams.set("offset", params.offset || "0");
+  const LIMITE_MAX_PEDIDOS = 400;
+  const PAGE_SIZE = 100;
+  let pedidosResumo = [];
+  let offset = 0;
+  while (true) {
+    const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
+    listUrl.searchParams.set("dataInicial", dataInicial);
+    listUrl.searchParams.set("dataFinal", dataFinal);
+    listUrl.searchParams.set("limit", String(PAGE_SIZE));
+    listUrl.searchParams.set("offset", String(offset));
 
-  let listResp, listData;
-  try {
-    listResp = await fetch(listUrl.toString(), {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-    listData = await listResp.json();
-  } catch (err) {
-    return jsonResponse(500, { error: "Erro ao listar pedidos.", detail: String(err) });
-  }
-  if (!listResp.ok) {
-    return jsonResponse(listResp.status, {
-      error: "A API do Tiny retornou um erro ao listar pedidos.",
-      detail: listData
-    });
-  }
+    let listResp, listData;
+    try {
+      listResp = await fetch(listUrl.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      listData = await listResp.json();
+    } catch (err) {
+      return jsonResponse(500, { error: "Erro ao listar pedidos.", detail: String(err) });
+    }
+    if (!listResp.ok) {
+      return jsonResponse(listResp.status, {
+        error: "A API do Tiny retornou um erro ao listar pedidos.",
+        detail: listData
+      });
+    }
 
-  const pedidosResumo = listData.itens || [];
+    const pagina = listData.itens || [];
+    pedidosResumo = pedidosResumo.concat(pagina);
+
+    const total = listData.paginacao ? listData.paginacao.total : pagina.length;
+    offset += PAGE_SIZE;
+    if (pagina.length < PAGE_SIZE) break;
+    if (offset >= total) break;
+    if (pedidosResumo.length >= LIMITE_MAX_PEDIDOS) break;
+  }
+  const truncado = pedidosResumo.length >= LIMITE_MAX_PEDIDOS;
+  if (truncado) pedidosResumo = pedidosResumo.slice(0, LIMITE_MAX_PEDIDOS);
 
   const linhas = [];
   const erros = [];
@@ -114,6 +129,8 @@ exports.handler = async (event) => {
   return jsonResponse(200, {
     linhas,
     totalPedidos: pedidosResumo.length,
+    periodoBuscado: { dataInicial, dataFinal },
+    truncado: truncado || undefined,
     erros: erros.length ? erros : undefined
   });
 };
@@ -137,4 +154,16 @@ function hojeBrasil() {
     day: "2-digit"
   });
   return fmt.format(new Date());
+}
+
+function diasAtrasBrasil(n) {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return fmt.format(d);
 }
