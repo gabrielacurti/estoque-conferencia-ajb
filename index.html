@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script type="module">
 
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
@@ -31,7 +32,6 @@
   const db = getFirestore(app);
   const itemsCol = collection(db, "sessions", "current", "items");
   const sessionDocRef = doc(db, "sessions", "current");
-  const historyCol = collection(db, "sessions", "current", "history");
 
   function itemDocId(sku, suffix){
     const base = String(sku||"").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "_") || "ITEM";
@@ -86,38 +86,6 @@
     async loadKits(){
       const snap = await getDoc(sessionDocRef);
       return snap.exists() ? (snap.data().kits || {}) : {};
-    },
-    async archiveSession(items){
-      if(!items || !items.length) return;
-      const dateStr = new Date().toISOString().slice(0,10);
-      const ref = doc(historyCol);
-      await setDoc(ref, { date: dateStr, archivedAt: serverTimestamp(), items });
-    },
-    async loadHistory(){
-      const snap = await getDocs(historyCol);
-      const out = [];
-      snap.forEach(d => out.push(Object.assign({id:d.id}, d.data())));
-      return out;
-    },
-    async deleteHistoryByMonth(monthPrefix){
-      const snap = await getDocs(historyCol);
-      const batch = writeBatch(db);
-      let count = 0;
-      snap.forEach(d => {
-        const data = d.data();
-        if(data.date && data.date.startsWith(monthPrefix)){
-          batch.delete(d.ref);
-          count++;
-        }
-      });
-      if(count) await batch.commit();
-      return count;
-    },
-    async deleteAllHistory(){
-      const snap = await getDocs(historyCol);
-      const batch = writeBatch(db);
-      snap.forEach(d => batch.delete(d.ref));
-      await batch.commit();
     }
   };
   window.dispatchEvent(new Event("fb-ready"));
@@ -381,7 +349,6 @@
 <div class="brand-stripe"></div>
 <div class="tabnav">
   <button id="tabBtnConf" class="active">📋 Conferência de Estoque</button>
-  <button id="tabBtnHist">🗂️ Histórico</button>
 </div>
 
 <div id="tab-conf" class="tool-panel">
@@ -500,6 +467,10 @@
     <div class="card" id="cardPedidos">
       <h2>2. Importar pedidos do dia</h2>
       <div class="hint">Exporte os relatórios de pedidos/vendas de hoje de cada canal. Só os produtos que aparecerem aqui vão entrar na contagem.</div>
+
+      <button class="btn btn-primary btn-block" id="btnBuscarTinyPedidos" style="margin-top:10px;">🔄 Buscar pedidos de hoje do Tiny (automático)</button>
+      <div class="small-note" id="tinyPedidosStatusNote" style="margin-top:6px; margin-bottom:6px;"></div>
+      <div class="small-note" style="margin-bottom:10px;">Isso já preenche os dois canais abaixo sozinho. Se preferir, ainda dá pra importar a planilha manualmente como sempre.</div>
 
       <div style="display:flex; gap:8px; margin-top:10px;">
         <button type="button" class="step-pill active" id="chTabMl" style="cursor:pointer; border:none;">Mercado Livre</button>
@@ -624,7 +595,7 @@
     </div>
 
     <div id="mlBucketPanelOutros" class="hidden">
-      <div class="small-note" style="margin-bottom:10px;">Pedidos com despacho previsto pra outro dia — ordenados pela data mais próxima primeiro. Contar aqui é opcional, serve pra já ir adiantando a separação.</div>
+      <div class="small-note" style="margin-bottom:10px;">Pedidos com despacho previsto pra outro dia - ordenados pela data mais próxima primeiro. Contar aqui é opcional, serve pra já ir adiantando a separação.</div>
       <div id="itemListMlOutros"></div>
       <div class="empty hidden" id="emptyStateMlOutros">Nenhum pedido para outros dias.</div>
     </div>
@@ -650,25 +621,12 @@
       <button class="btn btn-ghost btn-block" id="btnResetSessionSh" style="margin-top:12px;">🔄 Encerrar contagem de hoje e começar nova (apaga pra todos)</button>
     </div>
 
-    <div style="display:flex; gap:8px; margin:0 0 12px;">
-      <button type="button" class="step-pill active" id="shBucketTabHoje" style="cursor:pointer; border:none;">Pedidos para despachar hoje</button>
-      <button type="button" class="step-pill" id="shBucketTabOutros" style="cursor:pointer; border:none;">Pedidos para despachar outros dias</button>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <input type="text" id="manualItemInputSh" placeholder="Novo pedido: nome da peça..." style="flex:1;">
+      <button class="btn btn-primary" id="btnAddManualSh" style="white-space:nowrap;">+ Adicionar</button>
     </div>
-
-    <div id="shBucketPanelHoje">
-      <div style="display:flex; gap:8px; margin-bottom:12px;">
-        <input type="text" id="manualItemInputSh" placeholder="Novo pedido: nome da peça..." style="flex:1;">
-        <button class="btn btn-primary" id="btnAddManualSh" style="white-space:nowrap;">+ Adicionar</button>
-      </div>
-      <div id="itemListSh"></div>
-      <div class="empty hidden" id="emptyStateSh">Nenhum item encontrado com esse filtro.</div>
-    </div>
-
-    <div id="shBucketPanelOutros" class="hidden">
-      <div class="small-note" style="margin-bottom:10px;">Pedidos com despacho previsto pra outro dia (ou já vencidos) — ordenados pela data mais próxima primeiro. Contar aqui é opcional, serve pra já ir adiantando a separação.</div>
-      <div id="itemListShOutros"></div>
-      <div class="empty hidden" id="emptyStateShOutros">Nenhum pedido para outros dias.</div>
-    </div>
+    <div id="itemListSh"></div>
+    <div class="empty hidden" id="emptyStateSh">Nenhum item encontrado com esse filtro.</div>
 
     <button class="btn btn-primary btn-block" id="btnSaveWhatsappSh" style="margin-top:12px;">💾 Salvar e enviar relatório <svg width="18" height="18" viewBox="0 0 32 32" style="vertical-align:-4px; margin-left:6px;"><circle cx="16" cy="16" r="16" fill="#25D366"/><path fill="#fff" d="M23.5 8.5c-2-2-4.6-3.1-7.5-3.1-5.8 0-10.6 4.7-10.6 10.6 0 1.9.5 3.7 1.4 5.3L5.5 26.5l5.3-1.4c1.5.8 3.2 1.3 5 1.3 5.8 0 10.6-4.7 10.6-10.6 0-2.8-1.1-5.5-3.1-7.5zm-7.5 16.3c-1.6 0-3.1-.4-4.5-1.2l-.3-.2-3.3.9.9-3.2-.2-.3c-.9-1.4-1.3-3-1.3-4.7 0-4.8 3.9-8.7 8.7-8.7 2.3 0 4.5.9 6.1 2.6 1.6 1.6 2.6 3.8 2.6 6.1 0 4.8-3.9 8.7-8.7 8.7zm4.8-6.5c-.3-.1-1.5-.7-1.7-.8-.2-.1-.4-.1-.6.1-.2.3-.7.8-.8 1-.2.2-.3.2-.5.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.5-1.4-1.8-.2-.3 0-.4.1-.6.1-.1.3-.3.4-.5.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4-.1-.1-.6-1.4-.8-1.9-.2-.5-.4-.4-.6-.4h-.5c-.2 0-.4.1-.6.3-.2.2-.8.8-.8 1.9 0 1.1.8 2.2.9 2.4.1.2 1.6 2.4 3.8 3.4.5.2 1 .4 1.3.5.5.2 1 .1 1.4.1.4-.1 1.3-.5 1.5-1 .2-.5.2-.9.1-1z"/></svg></button>
     <div class="small-note" id="whatsappStatusNoteSh" style="margin-top:6px; margin-bottom:16px;"></div>
@@ -730,56 +688,6 @@
 
 </main>
 <div class="fab-bar hidden" id="fabBar"></div>
-</div>
-
-
-<div id="tab-hist" class="tool-panel hidden">
-<header class="topbar">
-  <div style="display:flex; align-items:center; gap:10px;">
-    <img src="https://ajbengoa.com.br/wp-content/uploads/2023/03/cropped-icone-192x192.png" alt="" style="width:34px; height:34px; border-radius:8px;">
-    <div>
-      <h1 style="font-size:17px;">Histórico</h1>
-      <div class="sublabel">registro do que foi contado, mês a mês</div>
-    </div>
-  </div>
-</header>
-
-<main>
-  <div class="card">
-    <h2>Filtrar por mês</h2>
-    <div class="field">
-      <label>Mês</label>
-      <select id="hist_monthSelect"></select>
-    </div>
-    <div class="small-note" id="hist_statusText">Carregando histórico…</div>
-  </div>
-
-  <div class="card">
-    <h2>Produtos mais vendidos do mês</h2>
-    <div class="hint">Separado por marketplace — top 10 de cada um.</div>
-    <div style="margin-top:8px;">
-      <div class="small-note" style="font-weight:600; color:var(--ink);">Mercado Livre</div>
-      <div id="hist_topMl"></div>
-    </div>
-    <div style="margin-top:16px;">
-      <div class="small-note" style="font-weight:600; color:var(--ink);">Shopee</div>
-      <div id="hist_topSh"></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Produtos com mais divergência</h2>
-    <div class="hint">Onde a contagem manual mais destoou do saldo do sistema, somado no mês.</div>
-    <div id="hist_topDiverg" style="margin-top:8px;"></div>
-  </div>
-
-  <div class="card">
-    <h2>Apagar histórico</h2>
-    <div class="hint">Passou o mês e não precisa mais guardar? Apague pra não deixar o banco de dados pesado.</div>
-    <button class="btn btn-ghost btn-block" id="hist_btnDeleteMonth" style="margin-top:8px;">🗑️ Apagar histórico do mês selecionado</button>
-    <button class="btn btn-ghost btn-block" id="hist_btnDeleteAll" style="margin-top:8px;">🗑️ Apagar TODO o histórico</button>
-  </div>
-</main>
 </div>
 
 <script>
@@ -866,7 +774,6 @@
   const itemListMl = el("itemListMl"), itemListSh = el("itemListSh");
   const emptyStateMl = el("emptyStateMl"), emptyStateSh = el("emptyStateSh");
   const itemListMlOutros = el("itemListMlOutros"), emptyStateMlOutros = el("emptyStateMlOutros");
-  const itemListShOutros = el("itemListShOutros"), emptyStateShOutros = el("emptyStateShOutros");
   const relatorioList = el("relatorioList"), emptyStateRelatorio = el("emptyStateRelatorio");
   const searchBoxRelatorio = el("searchBoxRelatorio");
 
@@ -877,14 +784,6 @@
   el("mlBucketTabOutros").addEventListener("click", () => {
     el("mlBucketTabOutros").classList.add("active"); el("mlBucketTabHoje").classList.remove("active");
     el("mlBucketPanelOutros").classList.remove("hidden"); el("mlBucketPanelHoje").classList.add("hidden");
-  });
-  el("shBucketTabHoje").addEventListener("click", () => {
-    el("shBucketTabHoje").classList.add("active"); el("shBucketTabOutros").classList.remove("active");
-    el("shBucketPanelHoje").classList.remove("hidden"); el("shBucketPanelOutros").classList.add("hidden");
-  });
-  el("shBucketTabOutros").addEventListener("click", () => {
-    el("shBucketTabOutros").classList.add("active"); el("shBucketTabHoje").classList.remove("active");
-    el("shBucketPanelOutros").classList.remove("hidden"); el("shBucketPanelHoje").classList.add("hidden");
   });
   const searchBoxMl = el("searchBoxMl"), searchBoxSh = el("searchBoxSh");
   const zeradosList = el("zeradosList"), emptyStateZerados = el("emptyStateZerados");
@@ -1156,8 +1055,7 @@
 
   function setupPedidosChannel(dz, fileInput, mapArea, mapSku, mapDesc, mapQtd, mapId, previewNote, statusEl, label, setData, opts){
     opts = opts || {};
-    setupDropzone(dz, fileInput, (data) => {
-      const parsed = toHeadersRows(data);
+    function applyParsed(parsed){
       setData(parsed);
       fillSelect(mapSku, parsed.headers);
       fillSelect(mapDesc, parsed.headers);
@@ -1189,21 +1087,68 @@
       if(opts.mapCusto) watchSels.push(opts.mapCusto);
       watchSels.forEach(sel => sel.onchange = updatePreview);
       statusEl.textContent = `${label}: ${parsed.rows.length} linha(s) carregada(s).`;
+    }
+    setupDropzone(dz, fileInput, (data) => {
+      applyParsed(toHeadersRows(data));
+    });
+    return applyParsed;
+  }
+
+  const applyParsedMl = setupPedidosChannel(dzPedidosMl, filePedidosMl, mapPedidosAreaMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, previewNotePedMl, chStatusMl, "Mercado Livre", (d) => { pedidosMl = d; }, {
+    mapDespacho: el("mapPedDespachoMl"),
+    mapCusto: el("mapPedCustoMl"),
+    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoMl"), mapPedSkuMl, mapPedQtdMl, el("dispatchSplitNoteMl"), false)
+  });
+  const applyParsedSh = setupPedidosChannel(dzPedidosSh, filePedidosSh, mapPedidosAreaSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, previewNotePedSh, chStatusSh, "Shopee", (d) => { pedidosSh = d; }, {
+    mapDespacho: el("mapPedDespachoSh"),
+    mapCusto: el("mapPedCustoSh"),
+    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoSh"), mapPedSkuSh, mapPedQtdSh, el("dispatchSplitNoteSh"), true)
+  });
+
+  const btnBuscarTinyPedidos = el("btnBuscarTinyPedidos");
+  if(btnBuscarTinyPedidos){
+    btnBuscarTinyPedidos.addEventListener("click", async () => {
+      const noteEl = el("tinyPedidosStatusNote");
+      noteEl.textContent = "Buscando pedidos no Tiny...";
+      btnBuscarTinyPedidos.disabled = true;
+      try{
+        const resp = await fetch("/api/tiny-pedidos");
+        const data = await resp.json();
+        if(!resp.ok){
+          noteEl.textContent = "Erro: " + (data.error || "não consegui buscar os pedidos.");
+          console.error("Erro ao buscar pedidos do Tiny", data);
+          return;
+        }
+        const linhas = data.linhas || [];
+        if(!linhas.length){
+          noteEl.textContent = "Nenhum pedido encontrado hoje no Tiny.";
+          return;
+        }
+        const headers = ["SKU","Descrição","Quantidade","Número do Pedido","Data Máxima de Despacho","Custo Unitário"];
+        const mlRows = [];
+        const shRows = [];
+        linhas.forEach(l => {
+          const row = [l.sku, l.descricao, l.quantidade, l.numeroPedido, l.dataPrevista, l.valorUnitario];
+          const canal = (l.canal || "").toLowerCase();
+          if(canal.includes("mercado")) mlRows.push(row);
+          else if(canal.includes("shopee")) shRows.push(row);
+        });
+        if(mlRows.length) applyParsedMl({headers, rows: mlRows});
+        if(shRows.length) applyParsedSh({headers, rows: shRows});
+        let msg = `Pronto! ${mlRows.length} linha(s) do Mercado Livre, ${shRows.length} linha(s) da Shopee.`;
+        if(data.erros && data.erros.length) msg += ` (${data.erros.length} pedido(s) deram erro ao buscar detalhe — confere o console.)`;
+        noteEl.textContent = msg;
+        if(data.erros && data.erros.length) console.error("Pedidos com erro ao buscar detalhe:", data.erros);
+      }catch(err){
+        console.error("Erro ao buscar pedidos do Tiny", err);
+        noteEl.textContent = "Erro ao buscar pedidos: " + err.message;
+      }finally{
+        btnBuscarTinyPedidos.disabled = false;
+      }
     });
   }
 
-  setupPedidosChannel(dzPedidosMl, filePedidosMl, mapPedidosAreaMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, previewNotePedMl, chStatusMl, "Mercado Livre", (d) => { pedidosMl = d; }, {
-    mapDespacho: el("mapPedDespachoMl"),
-    mapCusto: el("mapPedCustoMl"),
-    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoMl"), mapPedSkuMl, mapPedQtdMl, el("dispatchSplitNoteMl"))
-  });
-  setupPedidosChannel(dzPedidosSh, filePedidosSh, mapPedidosAreaSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, previewNotePedSh, chStatusSh, "Shopee", (d) => { pedidosSh = d; }, {
-    mapDespacho: el("mapPedDespachoSh"),
-    mapCusto: el("mapPedCustoSh"),
-    onUpdate: (parsed) => renderDispatchSplitNote(parsed, el("mapPedDespachoSh"), mapPedSkuSh, mapPedQtdSh, el("dispatchSplitNoteSh"))
-  });
-
-  function renderDispatchSplitNote(parsed, mapDespachoEl, mapSkuEl, mapQtdEl, noteEl){
+  function renderDispatchSplitNote(parsed, mapDespachoEl, mapSkuEl, mapQtdEl, noteEl, includesFuture){
     const dIdx = parseInt(mapDespachoEl.value);
     if(!(dIdx >= 0)){
       noteEl.textContent = "";
@@ -1221,20 +1166,26 @@
       else if(cls === "outros") outrosCount++;
       else vencidoCount++;
     });
-    noteEl.textContent = `${hojeCount} linha(s) pra despachar hoje (entram na contagem abaixo), ${outrosCount} pra outros dias.${vencidoCount ? ` ${vencidoCount} linha(s) com data já vencida foram ignoradas (fora da contagem).` : ""}`;
+    if(includesFuture){
+      noteEl.textContent = `${hojeCount + outrosCount} linha(s) entram na contagem (${hojeCount} de hoje, ${outrosCount} com despacho futuro).${vencidoCount ? ` ${vencidoCount} linha(s) com data já vencida foram ignoradas (fora da contagem).` : ""}`;
+    } else {
+      noteEl.textContent = `${hojeCount} linha(s) pra despachar hoje (entram na contagem abaixo), ${outrosCount} pra outros dias.${vencidoCount ? ` ${vencidoCount} linha(s) com data já vencida foram ignoradas (fora da contagem).` : ""}`;
+    }
   }
 
   let pedidosAgg = null;
   let pedidosAggOutros = null;
-  let pedidosAggOutrosSh = null;
 
-  function addChannelToAgg(agg, parsed, mapSku, mapDesc, mapQtd, mapId, channelLabel, rowFilter, mapCusto){
+  function addChannelToAgg(agg, parsed, mapSku, mapDesc, mapQtd, mapId, channelLabel, rowFilter, mapCusto, mapDespacho){
     if(!parsed) return;
     const s = parseInt(mapSku.value), d = parseInt(mapDesc.value), q = parseInt(mapQtd.value);
     const idIdx = parseInt(mapId.value);
     const useId = idIdx >= 0;
     const custoIdx = mapCusto ? parseInt(mapCusto.value) : -1;
     const useCusto = custoIdx >= 0;
+    const despachoIdx = mapDespacho ? parseInt(mapDespacho.value) : -1;
+    const useDespacho = despachoIdx >= 0;
+    const today = new Date();
     let lastRawId = "";
     parsed.rows.forEach(r => {
       let rawId = useId ? String(r[idIdx] ?? "").trim() : "";
@@ -1251,6 +1202,8 @@
       const descRaw = String(r[d] ?? "").trim();
       const pedidoId = rawId ? `${channelLabel}: ${rawId}` : "";
       const custoVal = useCusto ? parseNum(r[custoIdx]) : null;
+      let dateObj = useDespacho ? parseDateFlexible(r[despachoIdx]) : null;
+      if(dateObj && isSameDay(dateObj, today)) dateObj = null; // hoje não precisa mostrar a data no card
       if(agg.has(key)){
         const entry = agg.get(key);
         entry.qtd += qtd;
@@ -1258,8 +1211,9 @@
         if(pedidoId && !entry.pedidoIds.includes(pedidoId)) entry.pedidoIds.push(pedidoId);
         if(!entry.channels.includes(channelLabel)) entry.channels.push(channelLabel);
         if(entry.custoUnitario == null && custoVal) entry.custoUnitario = custoVal;
+        if(dateObj && (!entry.dataDespacho || dateObj < entry.dataDespacho)) entry.dataDespacho = dateObj;
       } else {
-        agg.set(key, {sku:skuRaw, desc:descRaw, qtd, pedidoIds: pedidoId ? [pedidoId] : [], channels:[channelLabel], qtyByChannel:{[channelLabel]:qtd}, custoUnitario: custoVal || null});
+        agg.set(key, {sku:skuRaw, desc:descRaw, qtd, pedidoIds: pedidoId ? [pedidoId] : [], channels:[channelLabel], qtyByChannel:{[channelLabel]:qtd}, custoUnitario: custoVal || null, dataDespacho: dateObj});
       }
     });
   }
@@ -1323,18 +1277,15 @@
       const today = new Date();
       shFilter = (r) => {
         const dateObj = parseDateFlexible(r[dIdxSh]);
-        return classifyDispatch(dateObj, today) === "hoje";
+        return classifyDispatch(dateObj, today) !== "vencido";
       };
     }
-    addChannelToAgg(pedidosAgg, pedidosMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, "ML", mlFilter, el("mapPedCustoMl"));
-    addChannelToAgg(pedidosAgg, pedidosSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, "Shopee", shFilter, el("mapPedCustoSh"));
+    addChannelToAgg(pedidosAgg, pedidosMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, "ML", mlFilter, el("mapPedCustoMl"), el("mapPedDespachoMl"));
+    addChannelToAgg(pedidosAgg, pedidosSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, "Shopee", shFilter, el("mapPedCustoSh"), el("mapPedDespachoSh"));
     pedidosAgg = attachKitInfo(pedidosAgg);
 
     pedidosAggOutros = buildOutrosAgg(pedidosMl, mapPedSkuMl, mapPedDescMl, mapPedQtdMl, mapPedIdMl, dIdx, el("mapPedCustoMl"), "ML");
     pedidosAggOutros = attachKitInfo(pedidosAggOutros);
-
-    pedidosAggOutrosSh = buildOutrosAgg(pedidosSh, mapPedSkuSh, mapPedDescSh, mapPedQtdSh, mapPedIdSh, dIdxSh, el("mapPedCustoSh"), "Shopee");
-    pedidosAggOutrosSh = attachKitInfo(pedidosAggOutrosSh);
 
     el("confirmTiny").scrollIntoView({behavior:"smooth", block:"center"});
   });
@@ -1426,7 +1377,8 @@
           pedidoIds: p.pedidoIds || [],
           channels: p.channels || [],
           qtyByChannel: p.qtyByChannel || {},
-          custoUnitario: p.custoUnitario != null ? p.custoUnitario : null
+          custoUnitario: p.custoUnitario != null ? p.custoUnitario : null,
+          dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null
         }, extra);
       }
       let match = tinyBySku.get(key);
@@ -1448,16 +1400,21 @@
         pedidoIds: p.pedidoIds || [],
         channels: p.channels || [],
         qtyByChannel: p.qtyByChannel || {},
-        custoUnitario: p.custoUnitario != null ? p.custoUnitario : null
+        custoUnitario: p.custoUnitario != null ? p.custoUnitario : null,
+        dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null
       }, extra);
     }
 
-    // guarda o estado anterior de todos os itens (por SKU) pra não perder
-    // "já separado", contagem, observação etc. quando a planilha é reimportada —
-    // mesmo quando o pedido "muda de aba" (de outros dias pra hoje, no dia certo)
+    // guarda o estado anterior SÓ dos itens que estavam em "outros dias" (por SKU),
+    // pra não perder "já separado"/contagem quando o pedido "muda de aba" no dia certo.
+    // Itens que já estavam em "hoje" antes NÃO entram aqui — se entrassem, uma
+    // planilha reimportada sem clicar em "Encerrar contagem" herdaria contagem
+    // de um dia passado, fazendo parecer que um item já foi contado sem ter sido.
     const previousBySku = new Map();
     (state.items || []).forEach(prev => {
-      previousBySku.set(normSku(prev.sku), prev);
+      if(prev.isOutrosDias){
+        previousBySku.set(normSku(prev.sku), prev);
+      }
     });
 
     function carryOverState(item){
@@ -1484,9 +1441,6 @@
 
     const newItemsOutros = [];
     (pedidosAggOutros || new Map()).forEach((p, key) => {
-      newItemsOutros.push(carryOverState(buildItem(p, key, { isOutrosDias: true, dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null })));
-    });
-    (pedidosAggOutrosSh || new Map()).forEach((p, key) => {
       newItemsOutros.push(carryOverState(buildItem(p, key, { isOutrosDias: true, dataDespacho: p.dataDespacho ? p.dataDespacho.toISOString() : null })));
     });
 
@@ -1650,7 +1604,6 @@
       save();
       pedidosAgg = null;
       pedidosAggOutros = null;
-      pedidosAggOutrosSh = null;
       pedidosMl = null;
       pedidosSh = null;
       mapPedidosAreaMl.classList.add("hidden");
@@ -1663,17 +1616,10 @@
       el("dispatchSplitNoteSh").textContent = "";
       el("mlBucketTabHoje").classList.add("active"); el("mlBucketTabOutros").classList.remove("active");
       el("mlBucketPanelHoje").classList.remove("hidden"); el("mlBucketPanelOutros").classList.add("hidden");
-      el("shBucketTabHoje").classList.add("active"); el("shBucketTabOutros").classList.remove("active");
-      el("shBucketPanelHoje").classList.remove("hidden"); el("shBucketPanelOutros").classList.add("hidden");
       goToStep(1);
     };
     if(window.FB){
-      const itemsSnapshot = state.items.slice();
-      window.FB.archiveSession(itemsSnapshot).catch(err => {
-        console.error("Erro ao arquivar histórico (a contagem ainda será limpa)", err);
-      }).then(() => {
-        return window.FB.clearSession();
-      }).then(proceed).catch(err => {
+      window.FB.clearSession().then(proceed).catch(err => {
         console.error("Erro ao limpar sessão", err);
         alert("Não consegui limpar a sessão compartilhada agora (sem internet?). Tente de novo em instantes.");
       });
@@ -1738,7 +1684,6 @@
     renderItemsInto(filteredItems("ML", state.filterMl, state.searchMl, "hoje"), itemListMl, emptyStateMl, "pedido");
     renderItemsInto(filteredItems("Shopee", state.filterSh, state.searchSh, "hoje"), itemListSh, emptyStateSh, "pedido");
     renderItemsInto(filteredItems("ML", "all", "", "outros"), itemListMlOutros, emptyStateMlOutros, "date");
-    renderItemsInto(filteredItems("Shopee", "all", "", "outros"), itemListShOutros, emptyStateShOutros, "date");
   }
 
   function renderItemsInto(items, itemList, emptyState, sortMode){
@@ -2335,41 +2280,108 @@
     return doc.output("blob");
   }
 
-  async function saveAndShareWhatsapp(noteEl){
-    const blob = buildPdfReport();
-    if(!blob) return;
-    const ts = new Date().toISOString().slice(0,10);
-    const filename = `conferencia_estoque_${ts}.pdf`;
-    const file = new File([blob], filename, {type:"application/pdf"});
-
-    if(navigator.canShare && navigator.canShare({files:[file]})){
-      try{
-        await navigator.share({
-          files:[file],
-          title:"Conferência de Estoque",
-          text:`Relatório da conferência — ${ts}`
-        });
-        if(noteEl) noteEl.textContent = "Relatório compartilhado.";
-      }catch(err){
-        if(noteEl) noteEl.textContent = "";
-      }
-      return;
+  async function buildRelatorioDiaPdf(){
+    const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+    if(!jsPDFCtor || !window.html2canvas){
+      alert("Não consegui carregar o gerador de PDF agora (sem internet?). Tente de novo.");
+      return null;
     }
 
+    // monta uma cópia temporária da lista com o mesmo visual do app (mesmas classes/CSS),
+    // já que a lista de verdade pode estar filtrada por uma busca na hora de gerar o PDF
+    const lista = computeRelatorioDia();
+    const dataStr = new Date().toLocaleDateString("pt-BR");
+
+    const container = document.createElement("div");
+    container.style.cssText = "position:fixed; left:-9999px; top:0; width:680px; background:var(--app-bg,#EEF2F8); padding:0 0 16px;";
+    container.innerHTML = `
+      <div style="background:linear-gradient(180deg,#0B234F,#071B4A); color:#fff; padding:18px 20px; border-radius:10px 10px 0 0;">
+        <div style="font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:19px;">Relatório do Dia — AJ Bengoa</div>
+        <div style="font-family:'IBM Plex Mono',monospace; font-size:11px; opacity:.8; margin-top:4px;">${escapeHtml(dataStr)} · Produto e estoque atual</div>
+      </div>
+      <div style="padding:16px 20px 0;" id="pdfRelatorioRows"></div>
+    `;
+    document.body.appendChild(container);
+
+    const rowsHost = container.querySelector("#pdfRelatorioRows");
+    if(!lista.length){
+      rowsHost.innerHTML = `<div class="empty">Nenhum produto pra mostrar ainda.</div>`;
+    } else {
+      lista.forEach(it => {
+        const zerado = it.estoqueAtual === 0;
+        const div = document.createElement("div");
+        div.className = "disp-row" + (zerado ? " disp-row-alert" : "");
+        div.innerHTML = `
+          <div class="disp-main"><b>${escapeHtml(it.desc || it.sku)}</b> <span class="mono" style="color:var(--steel-700);">(${escapeHtml(it.sku)})</span>${it.divergente ? ` <span style="color:var(--red); font-size:11px;">(contagem manual)</span>` : ""}</div>
+          <div class="disp-date${zerado ? " disp-date-alert" : ""}">${zerado ? "⚠️ " : ""}${it.estoqueAtual===null||it.estoqueAtual===undefined ? "—" : it.estoqueAtual}</div>
+        `;
+        rowsHost.appendChild(div);
+      });
+    }
+
+    let canvas;
+    try{
+      canvas = await window.html2canvas(container, {scale:2, backgroundColor:"#EEF2F8", useCORS:true});
+    } finally {
+      document.body.removeChild(container);
+    }
+
+    const doc = new jsPDFCtor({unit:"pt", format:"a4"});
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 20;
+    const imgWidth = pageWidth - margin*2;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    const imgData = canvas.toDataURL("image/png");
+
+    let heightLeft = imgHeight;
+    let position = margin;
+    doc.addImage(imgData, "PNG", margin, position, imgWidth, imgHeight);
+    heightLeft -= (pageHeight - margin*2);
+
+    while(heightLeft > 0){
+      position = heightLeft - imgHeight + margin;
+      doc.addPage();
+      doc.addImage(imgData, "PNG", margin, position, imgWidth, imgHeight);
+      heightLeft -= (pageHeight - margin*2);
+    }
+
+    return doc.output("blob");
+  }
+
+  async function saveAndShareWhatsapp(noteEl, pdfBuilder, titulo, nomeArquivoBase){
+    const blob = await (pdfBuilder || buildPdfReport)();
+    if(!blob) return;
+    const ts = new Date().toISOString().slice(0,10);
+    const filename = `${nomeArquivoBase || "conferencia_estoque"}_${ts}.pdf`;
+    const file = new File([blob], filename, {type:"application/pdf"});
+
+    // baixa o PDF automaticamente sempre, independente de conseguir compartilhar depois
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    window.open(`https://wa.me/?text=${encodeURIComponent("Relatório da conferência de estoque de " + ts + " — anexa o PDF que acabou de baixar.")}`, "_blank");
+
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{
+        await navigator.share({
+          files:[file],
+          title: titulo || "Conferência de Estoque",
+          text:`${titulo || "Relatório"} — ${ts}`
+        });
+        if(noteEl) noteEl.textContent = "PDF baixado e compartilhado.";
+      }catch(err){
+        if(noteEl) noteEl.textContent = "PDF baixado.";
+      }
+      return;
+    }
+
+    window.open(`https://wa.me/?text=${encodeURIComponent((titulo || "Relatório") + " de " + ts + " — anexa o PDF que acabou de baixar.")}`, "_blank");
     if(noteEl) noteEl.textContent = "PDF baixado. O WhatsApp abriu numa aba — anexa o arquivo baixado na conversa.";
   }
 
-  ["btnSaveWhatsapp"].forEach(id => {
-    const btn = el(id);
-    if(!btn) return;
-    btn.addEventListener("click", () => saveAndShareWhatsapp(el(id.replace("btnSaveWhatsapp","whatsappStatusNote"))));
-  });
+  el("btnSaveWhatsapp").addEventListener("click", () => saveAndShareWhatsapp(el("whatsappStatusNote"), buildPdfReport, "Conferência de Estoque", "conferencia_estoque"));
 
   async function saveAndShareLinkWhatsapp(noteEl){
     const link = location.origin + location.pathname + "#relatorio";
@@ -2388,7 +2400,7 @@
   }
   el("btnSaveWhatsappMl").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteMl")));
   el("btnSaveWhatsappSh").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteSh")));
-  el("btnSaveWhatsappRel").addEventListener("click", () => saveAndShareLinkWhatsapp(el("whatsappStatusNoteRel")));
+  el("btnSaveWhatsappRel").addEventListener("click", () => saveAndShareWhatsapp(el("whatsappStatusNoteRel"), buildRelatorioDiaPdf, "Relatório do Dia", "relatorio_do_dia"));
 
   if(location.hash === "#relatorio" && state.items.length){
     goToStep(6);
@@ -2399,207 +2411,6 @@
 })();
 
 </script>
-<script>
-(function(){
-  "use strict";
 
-  function el(id){ return document.getElementById(id); }
-  function escapeHtml(s){
-    return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-  }
-
-  let historyDocs = null;
-  let loading = false;
-
-  async function ensureLoaded(){
-    if(historyDocs !== null || loading) return;
-    if(!window.FB){
-      el("hist_statusText").textContent = "Conectando ao banco…";
-      window.addEventListener("fb-ready", () => ensureLoaded(), {once:true});
-      return;
-    }
-    loading = true;
-    el("hist_statusText").textContent = "Carregando histórico…";
-    try{
-      historyDocs = await window.FB.loadHistory();
-      populateMonthSelect();
-      renderAll();
-    }catch(err){
-      console.error("Erro ao carregar histórico", err);
-      el("hist_statusText").textContent = "Não consegui carregar o histórico agora (sem internet?).";
-    }
-    loading = false;
-  }
-
-  function monthsAvailable(){
-    const set = new Set();
-    (historyDocs||[]).forEach(d => { if(d.date) set.add(d.date.slice(0,7)); });
-    return Array.from(set).sort().reverse();
-  }
-
-  function monthLabel(m){
-    const [y, mo] = m.split("-");
-    const nomes = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"];
-    return `${nomes[parseInt(mo)-1]} de ${y}`;
-  }
-
-  function populateMonthSelect(){
-    const sel = el("hist_monthSelect");
-    const months = monthsAvailable();
-    const currentMonth = new Date().toISOString().slice(0,7);
-    sel.innerHTML = "";
-    if(!months.length){
-      const opt = document.createElement("option");
-      opt.value = currentMonth; opt.textContent = monthLabel(currentMonth) + " (sem dados ainda)";
-      sel.appendChild(opt);
-      return;
-    }
-    months.forEach(m => {
-      const opt = document.createElement("option");
-      opt.value = m; opt.textContent = monthLabel(m);
-      sel.appendChild(opt);
-    });
-  }
-
-  function docsForSelectedMonth(){
-    const month = el("hist_monthSelect").value;
-    return (historyDocs||[]).filter(d => d.date && d.date.startsWith(month));
-  }
-
-  function flattenItems(docs){
-    const flat = [];
-    docs.forEach(doc => {
-      (doc.items||[]).forEach(it => {
-        if(it.kitComponents && it.kitComponents.length){
-          it.kitComponents.forEach(c => {
-            flat.push({
-              sku: c.sku, desc: c.desc,
-              qtyByChannel: c.qtyByChannel || {},
-              saldoSistema: c.saldoSistema,
-              contado: (c.isCounted===false) ? null : c.contado
-            });
-          });
-        } else {
-          flat.push({
-            sku: it.sku, desc: it.desc,
-            qtyByChannel: it.qtyByChannel || {},
-            saldoSistema: it.saldoSistema,
-            contado: (it.isCounted===false) ? null : it.contado
-          });
-        }
-      });
-    });
-    return flat;
-  }
-
-  function topSellers(flat, channel, limit){
-    const byKey = new Map();
-    flat.forEach(r => {
-      const qty = (r.qtyByChannel||{})[channel] || 0;
-      if(!qty) return;
-      const key = r.sku + "||" + r.desc;
-      if(byKey.has(key)) byKey.get(key).qty += qty;
-      else byKey.set(key, {sku:r.sku, desc:r.desc, qty});
-    });
-    return Array.from(byKey.values()).sort((a,b)=>b.qty-a.qty).slice(0, limit||10);
-  }
-
-  function topDivergences(flat, limit){
-    const byKey = new Map();
-    flat.forEach(r => {
-      if(r.contado === null || r.contado === undefined) return;
-      if(r.saldoSistema === null || r.saldoSistema === undefined) return;
-      const diff = Math.abs(r.contado - r.saldoSistema);
-      if(!diff) return;
-      const key = r.sku + "||" + r.desc;
-      if(byKey.has(key)) byKey.get(key).diff += diff;
-      else byKey.set(key, {sku:r.sku, desc:r.desc, diff});
-    });
-    return Array.from(byKey.values()).sort((a,b)=>b.diff-a.diff).slice(0, limit||10);
-  }
-
-  function renderBarList(container, rows, valueKey, warnColor){
-    container.innerHTML = "";
-    if(!rows.length){
-      container.innerHTML = `<div class="empty">Sem dados nesse mês.</div>`;
-      return;
-    }
-    const max = Math.max(...rows.map(r => r[valueKey]));
-    rows.forEach(r => {
-      const pct = max ? Math.round((r[valueKey]/max)*100) : 0;
-      const row = document.createElement("div");
-      row.className = "hbar-row";
-      row.innerHTML = `
-        <div class="hbar-label"><span>${escapeHtml(r.desc || r.sku)} <span class="mono" style="color:var(--steel-700);">(${escapeHtml(r.sku)})</span></span><span class="n">${r[valueKey]}</span></div>
-        <div class="hbar-track"><div class="hbar-fill${warnColor?' warn':''}" style="width:${pct}%;"></div></div>
-      `;
-      container.appendChild(row);
-    });
-  }
-
-  function renderAll(){
-    const docs = docsForSelectedMonth();
-    const flat = flattenItems(docs);
-    el("hist_statusText").textContent = docs.length
-      ? `${docs.length} contagem(ns) arquivada(s) nesse mês.`
-      : "Nenhuma contagem arquivada nesse mês ainda — o histórico é gravado toda vez que você usa \"Encerrar contagem\" na Conferência de Estoque.";
-    renderBarList(el("hist_topMl"), topSellers(flat, "ML", 10), "qty", false);
-    renderBarList(el("hist_topSh"), topSellers(flat, "Shopee", 10), "qty", false);
-    renderBarList(el("hist_topDiverg"), topDivergences(flat, 10), "diff", true);
-  }
-
-  el("hist_monthSelect").addEventListener("change", renderAll);
-
-  el("hist_btnDeleteMonth").addEventListener("click", () => {
-    const month = el("hist_monthSelect").value;
-    if(!confirm(`Apagar todo o histórico de ${monthLabel(month)}? Isso não pode ser desfeito.`)) return;
-    if(!window.FB) return;
-    window.FB.deleteHistoryByMonth(month).then((count) => {
-      alert(`${count||0} registro(s) apagado(s).`);
-      historyDocs = null;
-      ensureLoaded();
-    }).catch(err => {
-      console.error("Erro ao apagar histórico do mês", err);
-      alert("Não consegui apagar agora (sem internet?). Tente de novo.");
-    });
-  });
-
-  el("hist_btnDeleteAll").addEventListener("click", () => {
-    if(!confirm("Apagar TODO o histórico, de todos os meses? Isso não pode ser desfeito.")) return;
-    if(!window.FB) return;
-    window.FB.deleteAllHistory().then(() => {
-      alert("Histórico apagado.");
-      historyDocs = null;
-      ensureLoaded();
-    }).catch(err => {
-      console.error("Erro ao apagar todo o histórico", err);
-      alert("Não consegui apagar agora (sem internet?). Tente de novo.");
-    });
-  });
-
-  window.HistTool = {
-    refresh(){
-      historyDocs = null;
-      ensureLoaded();
-    }
-  };
-})();
-</script>
-<script>
-(function(){
-  const btnConf = document.getElementById("tabBtnConf");
-  const btnHist = document.getElementById("tabBtnHist");
-  const tabConf = document.getElementById("tab-conf");
-  const tabHist = document.getElementById("tab-hist");
-  function activate(btn, tab){
-    [btnConf,btnHist].forEach(b=>b.classList.remove("active"));
-    [tabConf,tabHist].forEach(t=>t.classList.add("hidden"));
-    btn.classList.add("active");
-    tab.classList.remove("hidden");
-  }
-  btnConf.addEventListener("click", () => activate(btnConf, tabConf));
-  btnHist.addEventListener("click", () => { activate(btnHist, tabHist); if(window.HistTool) window.HistTool.refresh(); });
-})();
-</script>
 </body>
 </html>
