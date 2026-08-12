@@ -109,7 +109,7 @@ exports.handler = async (event) => {
 
 async function fetchComRetry(url, accessToken, tentativa) {
   tentativa = tentativa || 1;
-  const MAX_TENTATIVAS = 4;
+  const MAX_TENTATIVAS = 2;
 
   let resp, rawText;
   try {
@@ -120,7 +120,7 @@ async function fetchComRetry(url, accessToken, tentativa) {
   }
 
   if (resp.status === 429 && tentativa < MAX_TENTATIVAS) {
-    const espera = 1000 * Math.pow(2, tentativa - 1);
+    const espera = 800 * tentativa; // 800ms, depois 1.6s
     await new Promise((r) => setTimeout(r, espera));
     return fetchComRetry(url, accessToken, tentativa + 1);
   }
