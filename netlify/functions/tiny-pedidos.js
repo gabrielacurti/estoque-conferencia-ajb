@@ -48,7 +48,7 @@ exports.handler = async (event) => {
 
   const linhas = [];
   const erros = [];
-  const BATCH_SIZE = 8;
+  const BATCH_SIZE = 3;
   for (let i = 0; i < pedidosResumo.length; i += BATCH_SIZE) {
     const lote = pedidosResumo.slice(i, i + BATCH_SIZE);
     const resultados = await Promise.all(
@@ -57,14 +57,37 @@ exports.handler = async (event) => {
           const detResp = await fetch(`https://api.tiny.com.br/public-api/v3/pedidos/${p.id}`, {
             headers: { Authorization: `Bearer ${accessToken}` }
           });
-          const detData = await detResp.json();
-          if (!detResp.ok) return { erro: true, idPedido: p.id, detail: detData };
+          const rawText = await detResp.text();
+          let detData = null;
+          if (rawText) {
+            try {
+              detData = JSON.parse(rawText);
+            } catch (parseErr) {
+              return {
+                erro: true,
+                idPedido: p.id,
+                status: detResp.status,
+                detail: `Resposta não é JSON válido: ${rawText.slice(0, 300)}`
+              };
+            }
+          }
+          if (!detResp.ok || !detData) {
+            return {
+              erro: true,
+              idPedido: p.id,
+              status: detResp.status,
+              detail: detData || (rawText ? rawText.slice(0, 300) : "(resposta vazia)")
+            };
+          }
           return { erro: false, pedido: detData };
         } catch (err) {
           return { erro: true, idPedido: p.id, detail: String(err) };
         }
       })
     );
+    if (i + BATCH_SIZE < pedidosResumo.length) {
+      await new Promise((r) => setTimeout(r, 300));
+    }
     resultados.forEach((r) => {
       if (r.erro) {
         erros.push(r);
