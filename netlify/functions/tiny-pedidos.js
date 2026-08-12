@@ -1,3 +1,9 @@
+// Busca os pedidos do dia (ou intervalo pedido) e, pra cada um, busca o detalhe
+// com os produtos vendidos (SKU, quantidade). Devolve uma lista "achatada",
+// uma linha por produto vendido, pronta pra alimentar o app direto.
+//
+// Acesse /api/tiny-pedidos (aceita ?dataInicial=YYYY-MM-DD&dataFinal=YYYY-MM-DD,
+// senão usa hoje pros dois).
 const { getValidAccessToken } = require("./tiny-token-helper");
 
 exports.handler = async (event) => {
@@ -16,28 +22,77 @@ exports.handler = async (event) => {
   const dataInicial = params.dataInicial || hoje;
   const dataFinal = params.dataFinal || hoje;
 
-  const url = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
-  url.searchParams.set("dataInicial", dataInicial);
-  url.searchParams.set("dataFinal", dataFinal);
-  if (params.situacao) url.searchParams.set("situacao", params.situacao);
-  url.searchParams.set("limit", params.limit || "100");
-  url.searchParams.set("offset", params.offset || "0");
+  const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
+  listUrl.searchParams.set("dataInicial", dataInicial);
+  listUrl.searchParams.set("dataFinal", dataFinal);
+  listUrl.searchParams.set("limit", params.limit || "100");
+  listUrl.searchParams.set("offset", params.offset || "0");
 
-  let resp, data;
+  let listResp, listData;
   try {
-    resp = await fetch(url.toString(), {
+    listResp = await fetch(listUrl.toString(), {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
-    data = await resp.json();
+    listData = await listResp.json();
   } catch (err) {
-    return jsonResponse(500, { error: "Erro ao contatar a API do Tiny.", detail: String(err) });
+    return jsonResponse(500, { error: "Erro ao listar pedidos.", detail: String(err) });
+  }
+  if (!listResp.ok) {
+    return jsonResponse(listResp.status, {
+      error: "A API do Tiny retornou um erro ao listar pedidos.",
+      detail: listData
+    });
   }
 
-  if (!resp.ok) {
-    return jsonResponse(resp.status, { error: "A API do Tiny retornou um erro.", detail: data });
+  const pedidosResumo = listData.itens || [];
+
+  const linhas = [];
+  const erros = [];
+  const BATCH_SIZE = 8;
+  for (let i = 0; i < pedidosResumo.length; i += BATCH_SIZE) {
+    const lote = pedidosResumo.slice(i, i + BATCH_SIZE);
+    const resultados = await Promise.all(
+      lote.map(async (p) => {
+        try {
+          const detResp = await fetch(`https://api.tiny.com.br/public-api/v3/pedidos/${p.id}`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          });
+          const detData = await detResp.json();
+          if (!detResp.ok) return { erro: true, idPedido: p.id, detail: detData };
+          return { erro: false, pedido: detData };
+        } catch (err) {
+          return { erro: true, idPedido: p.id, detail: String(err) };
+        }
+      })
+    );
+    resultados.forEach((r) => {
+      if (r.erro) {
+        erros.push(r);
+        return;
+      }
+      const pedido = r.pedido;
+      const canal = pedido.ecommerce && pedido.ecommerce.nome ? pedido.ecommerce.nome : "";
+      const numeroPedido =
+        (pedido.ecommerce && pedido.ecommerce.numeroPedidoEcommerce) || pedido.numeroPedido || "";
+      (pedido.itens || []).forEach((item) => {
+        linhas.push({
+          sku: item.produto ? item.produto.sku : "",
+          descricao: item.produto ? item.produto.descricao : "",
+          quantidade: item.quantidade,
+          valorUnitario: item.valorUnitario,
+          numeroPedido: numeroPedido,
+          canal: canal,
+          dataPrevista: pedido.dataPrevista || ""
+        });
+      });
+    });
   }
 
-  return jsonResponse(200, data);
+  return jsonResponse(200, {
+    linhas,
+    totalPedidos: pedidosResumo.length,
+    erros: erros.length ? erros : undefined
+  });
 };
 
 function jsonResponse(statusCode, obj) {
@@ -51,8 +106,6 @@ function jsonResponse(statusCode, obj) {
   };
 }
 
-// o servidor da function roda em UTC — calcula "hoje" pelo horário de
-// Brasília, senão à noite ela pede pedidos de "amanhã" (ainda não existem)
 function hojeBrasil() {
   const fmt = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
