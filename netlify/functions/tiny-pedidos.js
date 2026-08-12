@@ -3,7 +3,7 @@
 // uma linha por produto vendido, pronta pra alimentar o app direto.
 //
 // Acesse /api/tiny-pedidos (aceita ?dataInicial=YYYY-MM-DD&dataFinal=YYYY-MM-DD,
-// senão usa os últimos 7 dias até hoje).
+// senão usa os últimos 2 dias até hoje).
 const { getValidAccessToken } = require("./tiny-token-helper");
 
 exports.handler = async (event) => {
@@ -19,10 +19,10 @@ exports.handler = async (event) => {
 
   const params = event.queryStringParameters || {};
   const hoje = hojeBrasil();
-  const dataInicial = params.dataInicial || diasAtrasBrasil(7);
+  const dataInicial = params.dataInicial || diasAtrasBrasil(2);
   const dataFinal = params.dataFinal || hoje;
 
-  const LIMITE_MAX_PEDIDOS = 400;
+  const LIMITE_MAX_PEDIDOS = 400; // trava de segurança pra function não estourar o tempo
   const PAGE_SIZE = 100;
   let pedidosResumo = [];
   let offset = 0;
@@ -33,32 +33,15 @@ exports.handler = async (event) => {
     listUrl.searchParams.set("limit", String(PAGE_SIZE));
     listUrl.searchParams.set("offset", String(offset));
 
-    let listResp, listData, listRawText;
-    try {
-      listResp = await fetch(listUrl.toString(), {
-        headers: { Authorization: `Bearer ${accessToken}` }
-      });
-      listRawText = await listResp.text();
-    } catch (err) {
-      return jsonResponse(500, { error: "Erro ao listar pedidos (conexão).", detail: String(err) });
-    }
-    if (listRawText) {
-      try {
-        listData = JSON.parse(listRawText);
-      } catch (parseErr) {
-        return jsonResponse(502, {
-          error: "A API do Tiny devolveu uma resposta que não é JSON válido ao listar pedidos.",
-          status: listResp.status,
-          detail: listRawText.slice(0, 500)
-        });
-      }
-    }
-    if (!listResp.ok || !listData) {
-      return jsonResponse(listResp.status || 500, {
-        error: "A API do Tiny retornou um erro ao listar pedidos.",
-        detail: listData || (listRawText ? listRawText.slice(0, 500) : "(resposta vazia)")
+    const listResult = await fetchComRetry(listUrl.toString(), accessToken);
+    if (listResult.erroFatal) {
+      return jsonResponse(listResult.status || 500, {
+        error: listResult.error,
+        status: listResult.status,
+        detail: listResult.detail
       });
     }
+    const listData = listResult.data;
 
     const pagina = listData.itens || [];
     pedidosResumo = pedidosResumo.concat(pagina);
@@ -79,36 +62,14 @@ exports.handler = async (event) => {
     const lote = pedidosResumo.slice(i, i + BATCH_SIZE);
     const resultados = await Promise.all(
       lote.map(async (p) => {
-        try {
-          const detResp = await fetch(`https://api.tiny.com.br/public-api/v3/pedidos/${p.id}`, {
-            headers: { Authorization: `Bearer ${accessToken}` }
-          });
-          const rawText = await detResp.text();
-          let detData = null;
-          if (rawText) {
-            try {
-              detData = JSON.parse(rawText);
-            } catch (parseErr) {
-              return {
-                erro: true,
-                idPedido: p.id,
-                status: detResp.status,
-                detail: `Resposta não é JSON válido: ${rawText.slice(0, 300)}`
-              };
-            }
-          }
-          if (!detResp.ok || !detData) {
-            return {
-              erro: true,
-              idPedido: p.id,
-              status: detResp.status,
-              detail: detData || (rawText ? rawText.slice(0, 300) : "(resposta vazia)")
-            };
-          }
-          return { erro: false, pedido: detData };
-        } catch (err) {
-          return { erro: true, idPedido: p.id, detail: String(err) };
+        const r = await fetchComRetry(
+          `https://api.tiny.com.br/public-api/v3/pedidos/${p.id}`,
+          accessToken
+        );
+        if (r.erroFatal) {
+          return { erro: true, idPedido: p.id, status: r.status, detail: r.detail };
         }
+        return { erro: false, pedido: r.data };
       })
     );
     if (i + BATCH_SIZE < pedidosResumo.length) {
@@ -145,6 +106,53 @@ exports.handler = async (event) => {
     erros: erros.length ? erros : undefined
   });
 };
+
+async function fetchComRetry(url, accessToken, tentativa) {
+  tentativa = tentativa || 1;
+  const MAX_TENTATIVAS = 4;
+
+  let resp, rawText;
+  try {
+    resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    rawText = await resp.text();
+  } catch (err) {
+    return { erroFatal: true, error: "Erro de conexão com a API do Tiny.", detail: String(err) };
+  }
+
+  if (resp.status === 429 && tentativa < MAX_TENTATIVAS) {
+    const espera = 1000 * Math.pow(2, tentativa - 1);
+    await new Promise((r) => setTimeout(r, espera));
+    return fetchComRetry(url, accessToken, tentativa + 1);
+  }
+
+  let data = null;
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      return {
+        erroFatal: true,
+        status: resp.status,
+        error: "A API do Tiny devolveu uma resposta que não é JSON válido.",
+        detail: rawText.slice(0, 500)
+      };
+    }
+  }
+
+  if (!resp.ok || !data) {
+    return {
+      erroFatal: true,
+      status: resp.status,
+      error:
+        resp.status === 429
+          ? "A API do Tiny está limitando as chamadas (muitas requisições). Tenta de novo em alguns segundos."
+          : "A API do Tiny retornou um erro.",
+      detail: data || (rawText ? rawText.slice(0, 500) : "(resposta vazia)")
+    };
+  }
+
+  return { data };
+}
 
 function jsonResponse(statusCode, obj) {
   return {
