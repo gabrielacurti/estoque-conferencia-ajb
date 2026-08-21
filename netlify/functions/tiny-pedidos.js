@@ -4,15 +4,22 @@
 //
 // Acesse /api/tiny-pedidos (aceita ?dataInicial=YYYY-MM-DD&dataFinal=YYYY-MM-DD,
 // senão usa os últimos 2 dias até hoje).
+//
+// CONTINUAÇÃO: se a resposta vier com "parcial": true, ela também traz
+// "proximoOffsetDetalhe". Chame a rota de novo passando esse valor em
+// ?offsetDetalhe=N (mantendo as mesmas datas) pra continuar de onde parou,
+// em vez de reprocessar os pedidos que já foram buscados.
 const { getValidAccessToken } = require("./tiny-token-helper");
 
-// Orçamento de tempo total da function. O Netlify mata a execução em 60s (gerando
-// 502 pro navegador), então paramos de trabalhar bem antes disso e devolvemos o que
-// já foi processado, marcado como "parcial", em vez de deixar a function ser morta.
+// Orçamento de tempo total da function. O plano do Netlify em uso tem limite real
+// de invocação síncrona de 26s (gateway devolve 502 pro navegador se estourar,
+// mesmo que a function em si continue rodando por baixo). Paramos com boa folga
+// antes disso pra sempre devolver uma resposta válida (200), nunca deixar o
+// gateway "matar" a chamada.
 // IMPORTANTE: o cronômetro é reiniciado a cada chamada (dentro do handler), porque
 // o Netlify reaproveita o mesmo container "quente" entre invocações — se o início
 // ficasse fora do handler, só seria calculado uma vez na inicialização do container.
-const DEADLINE_MS = 45000;
+const DEADLINE_MS = 18000;
 
 exports.handler = async (event) => {
   const INICIO_EXECUCAO = Date.now();
@@ -34,6 +41,10 @@ exports.handler = async (event) => {
   const hoje = hojeBrasil();
   const dataInicial = params.dataInicial || diasAtrasBrasil(2);
   const dataFinal = params.dataFinal || hoje;
+  // Índice (dentro da lista de pedidos do período) de onde começar a buscar
+  // detalhe. 0 = começa do zero. Usado pra continuar uma busca que parou
+  // por tempo numa chamada anterior.
+  const offsetDetalheInicial = Math.max(0, parseInt(params.offsetDetalhe, 10) || 0);
 
   const LIMITE_MAX_PEDIDOS = 400; // trava de segurança pra function não estourar o tempo
   const PAGE_SIZE = 100;
@@ -77,7 +88,8 @@ exports.handler = async (event) => {
   const erros = [];
   const BATCH_SIZE = 3;
   let paradaPorTempoNoDetalhe = false;
-  for (let i = 0; i < pedidosResumo.length; i += BATCH_SIZE) {
+  let proximoOffsetDetalhe = offsetDetalheInicial;
+  for (let i = offsetDetalheInicial; i < pedidosResumo.length; i += BATCH_SIZE) {
     if (tempoEsgotado()) {
       paradaPorTempoNoDetalhe = true;
       break;
@@ -95,6 +107,7 @@ exports.handler = async (event) => {
         return { erro: false, pedido: r.data };
       })
     );
+    proximoOffsetDetalhe = i + BATCH_SIZE;
     if (i + BATCH_SIZE < pedidosResumo.length) {
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -121,7 +134,10 @@ exports.handler = async (event) => {
     });
   }
 
-  const parcial = paradaPorTempoNaListagem || paradaPorTempoNoDetalhe;
+  // Só é parcial de verdade se sobrou trabalho: paramos a listagem no meio,
+  // OU paramos o detalhe antes de cobrir todos os pedidos já listados.
+  const detalheIncompleto = proximoOffsetDetalhe < pedidosResumo.length;
+  const parcial = paradaPorTempoNaListagem || (paradaPorTempoNoDetalhe && detalheIncompleto);
 
   return jsonResponse(200, {
     linhas,
@@ -129,8 +145,9 @@ exports.handler = async (event) => {
     periodoBuscado: { dataInicial, dataFinal },
     truncado: truncado || undefined,
     parcial: parcial || undefined,
+    proximoOffsetDetalhe: parcial ? proximoOffsetDetalhe : undefined,
     avisoParcial: parcial
-      ? "A API do Tiny está lenta/limitando as chamadas agora, então paramos antes do tempo limite do servidor. Chame /api/tiny-pedidos de novo em alguns segundos pra tentar completar."
+      ? `A API do Tiny está lenta/limitando as chamadas agora, então paramos antes do tempo limite do servidor. Chame /api/tiny-pedidos?dataInicial=${dataInicial}&dataFinal=${dataFinal}&offsetDetalhe=${proximoOffsetDetalhe} pra continuar de onde parou.`
       : undefined,
     erros: erros.length ? erros : undefined
   });
