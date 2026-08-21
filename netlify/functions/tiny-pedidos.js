@@ -6,7 +6,20 @@
 // senão usa os últimos 2 dias até hoje).
 const { getValidAccessToken } = require("./tiny-token-helper");
 
+// Orçamento de tempo total da function. O Netlify mata a execução em 60s (gerando
+// 502 pro navegador), então paramos de trabalhar bem antes disso e devolvemos o que
+// já foi processado, marcado como "parcial", em vez de deixar a function ser morta.
+// IMPORTANTE: o cronômetro é reiniciado a cada chamada (dentro do handler), porque
+// o Netlify reaproveita o mesmo container "quente" entre invocações — se o início
+// ficasse fora do handler, só seria calculado uma vez na inicialização do container.
+const DEADLINE_MS = 45000;
+
 exports.handler = async (event) => {
+  const INICIO_EXECUCAO = Date.now();
+  function tempoEsgotado() {
+    return Date.now() - INICIO_EXECUCAO > DEADLINE_MS;
+  }
+
   let accessToken;
   try {
     accessToken = await getValidAccessToken();
@@ -26,7 +39,12 @@ exports.handler = async (event) => {
   const PAGE_SIZE = 100;
   let pedidosResumo = [];
   let offset = 0;
+  let paradaPorTempoNaListagem = false;
   while (true) {
+    if (tempoEsgotado()) {
+      paradaPorTempoNaListagem = true;
+      break;
+    }
     const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
     listUrl.searchParams.set("dataInicial", dataInicial);
     listUrl.searchParams.set("dataFinal", dataFinal);
@@ -58,7 +76,12 @@ exports.handler = async (event) => {
   const linhas = [];
   const erros = [];
   const BATCH_SIZE = 3;
+  let paradaPorTempoNoDetalhe = false;
   for (let i = 0; i < pedidosResumo.length; i += BATCH_SIZE) {
+    if (tempoEsgotado()) {
+      paradaPorTempoNoDetalhe = true;
+      break;
+    }
     const lote = pedidosResumo.slice(i, i + BATCH_SIZE);
     const resultados = await Promise.all(
       lote.map(async (p) => {
@@ -98,11 +121,17 @@ exports.handler = async (event) => {
     });
   }
 
+  const parcial = paradaPorTempoNaListagem || paradaPorTempoNoDetalhe;
+
   return jsonResponse(200, {
     linhas,
     totalPedidos: pedidosResumo.length,
     periodoBuscado: { dataInicial, dataFinal },
     truncado: truncado || undefined,
+    parcial: parcial || undefined,
+    avisoParcial: parcial
+      ? "A API do Tiny está lenta/limitando as chamadas agora, então paramos antes do tempo limite do servidor. Chame /api/tiny-pedidos de novo em alguns segundos pra tentar completar."
+      : undefined,
     erros: erros.length ? erros : undefined
   });
 };
