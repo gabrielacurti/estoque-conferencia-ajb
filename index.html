@@ -1115,21 +1115,56 @@
   if(btnBuscarTinyPedidos){
     btnBuscarTinyPedidos.addEventListener("click", async () => {
       const noteEl = el("tinyPedidosStatusNote");
-      noteEl.textContent = "Buscando pedidos no Tiny...";
       btnBuscarTinyPedidos.disabled = true;
       try{
-        const resp = await fetch("/api/tiny-pedidos");
-        const rawText = await resp.text();
-        let data = null;
-        if(rawText){
-          try{ data = JSON.parse(rawText); }catch(parseErr){ data = null; }
+        // A function /api/tiny-pedidos tem um limite de tempo por chamada (pra não
+        // estourar o timeout do servidor). Quando o Tiny está lento/limitando as
+        // chamadas, ela devolve "parcial: true" + "proximoOffsetDetalhe" em vez de
+        // todos os pedidos de uma vez. Aqui a gente chama de novo automaticamente
+        // com esse offset até completar, acumulando as linhas de todas as chamadas.
+        const MAX_CHAMADAS = 15; // trava de segurança (evita loop infinito)
+        let linhas = [];
+        let erros = [];
+        let dataInicial = null, dataFinal = null;
+        let offsetDetalhe = 0;
+        let chamada = 0;
+        let parcial = true;
+        while(parcial && chamada < MAX_CHAMADAS){
+          chamada++;
+          noteEl.textContent = chamada === 1
+            ? "Buscando pedidos no Tiny..."
+            : `Buscando pedidos no Tiny... (parte ${chamada}, continuando de onde parou)`;
+
+          let url = "/api/tiny-pedidos?offsetDetalhe=" + offsetDetalhe;
+          if(dataInicial && dataFinal){
+            url += "&dataInicial=" + encodeURIComponent(dataInicial) + "&dataFinal=" + encodeURIComponent(dataFinal);
+          }
+
+          const resp = await fetch(url);
+          const rawText = await resp.text();
+          let data = null;
+          if(rawText){
+            try{ data = JSON.parse(rawText); }catch(parseErr){ data = null; }
+          }
+          if(!resp.ok || !data){
+            noteEl.textContent = `Erro (status ${resp.status}): ` + (data && data.error ? data.error : "resposta vazia ou inválida do servidor. Tenta de novo em alguns segundos.");
+            console.error("Erro ao buscar pedidos do Tiny", {status: resp.status, rawText: rawText.slice(0,500)});
+            return;
+          }
+
+          linhas = linhas.concat(data.linhas || []);
+          if(data.erros && data.erros.length) erros = erros.concat(data.erros);
+          if(data.periodoBuscado){
+            dataInicial = data.periodoBuscado.dataInicial;
+            dataFinal = data.periodoBuscado.dataFinal;
+          }
+          parcial = !!data.parcial;
+          offsetDetalhe = data.proximoOffsetDetalhe || offsetDetalhe;
         }
-        if(!resp.ok || !data){
-          noteEl.textContent = `Erro (status ${resp.status}): ` + (data && data.error ? data.error : "resposta vazia ou inválida do servidor. Tenta de novo em alguns segundos.");
-          console.error("Erro ao buscar pedidos do Tiny", {status: resp.status, rawText: rawText.slice(0,500)});
-          return;
+        if(parcial){
+          noteEl.textContent = `A API do Tiny continua lenta/limitando depois de ${MAX_CHAMADAS} tentativas. Clique em "Buscar pedidos" de novo em alguns segundos pra tentar completar (o que já foi buscado até agora não será perdido).`;
         }
-        const linhas = data.linhas || [];
+
         if(!linhas.length){
           noteEl.textContent = "Nenhum pedido encontrado hoje no Tiny.";
           return;
@@ -1146,9 +1181,10 @@
         if(mlRows.length) applyParsedMl({headers, rows: mlRows});
         if(shRows.length) applyParsedSh({headers, rows: shRows});
         let msg = `Pronto! ${mlRows.length} linha(s) do Mercado Livre, ${shRows.length} linha(s) da Shopee.`;
-        if(data.erros && data.erros.length) msg += ` (${data.erros.length} pedido(s) deram erro ao buscar detalhe — confere o console.)`;
-        noteEl.textContent = msg;
-        if(data.erros && data.erros.length) console.error("Pedidos com erro ao buscar detalhe:", data.erros);
+        if(chamada > 1) msg += ` (levou ${chamada} chamadas por causa de lentidão no Tiny.)`;
+        if(erros.length) msg += ` (${erros.length} pedido(s) deram erro ao buscar detalhe — confere o console.)`;
+        if(!parcial || linhas.length) noteEl.textContent = msg;
+        if(erros.length) console.error("Pedidos com erro ao buscar detalhe:", erros);
       }catch(err){
         console.error("Erro ao buscar pedidos do Tiny", err);
         noteEl.textContent = "Erro ao buscar pedidos: " + err.message;
