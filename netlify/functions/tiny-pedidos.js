@@ -46,6 +46,13 @@ exports.handler = async (event) => {
   if (params.rawNumeroPedido) {
     return await diagnosticoRaw(params.rawNumeroPedido, accessToken);
   }
+
+  // MODO DIAGNÓSTICO TEMPORÁRIO 2: testa a API de Expedição (recém-liberada) de
+  // várias formas pra descobrir qual endpoint/parâmetro realmente funciona.
+  // Use ?rawExpedicaoIdPedido=<id interno do pedido no Tiny, ex: 895609857>.
+  if (params.rawExpedicaoIdPedido) {
+    return await diagnosticoExpedicao(params.rawExpedicaoIdPedido, accessToken);
+  }
   const hoje = hojeBrasil();
   const dataInicial = params.dataInicial || diasAtrasBrasil(2);
   const dataFinal = params.dataFinal || hoje;
@@ -129,8 +136,17 @@ exports.handler = async (event) => {
       const numeroPedido =
         (pedido.ecommerce && pedido.ecommerce.numeroPedidoEcommerce) || pedido.numeroPedido || "";
       (pedido.itens || []).forEach((item) => {
+        // Kits às vezes vêm sem SKU cadastrado no Tiny (só o id interno do
+        // produto). Sem isso, a venda inteira seria descartada mais na frente
+        // (o app ignora linha sem SKU). Usamos um SKU provisório baseado no id
+        // do produto — o app já sabe casar kit por descrição quando o SKU não
+        // bate com nada cadastrado, então a venda continua sendo contabilizada.
+        let skuFinal = item.produto ? item.produto.sku : "";
+        if (!skuFinal && item.produto && item.produto.id) {
+          skuFinal = `TINY-${item.produto.id}`;
+        }
         linhas.push({
-          sku: item.produto ? item.produto.sku : "",
+          sku: skuFinal,
           descricao: item.produto ? item.produto.descricao : "",
           quantidade: item.quantidade,
           valorUnitario: item.valorUnitario,
@@ -264,6 +280,35 @@ async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
     });
   }
   return jsonResponse(200, { pedidoCru: encontrado, resumoListaCru: encontradoResumoLista });
+}
+
+async function diagnosticoExpedicao(idPedido, accessToken) {
+  // Tenta várias formas plausíveis de consultar a API de Expedição de uma vez,
+  // já que a documentação pública não deixa claro o formato exato.
+  const tentativas = [
+    { nome: "GET /expedicao/{id}", url: `https://api.tiny.com.br/public-api/v3/expedicao/${idPedido}` },
+    { nome: "GET /expedicao?idPedido=", url: `https://api.tiny.com.br/public-api/v3/expedicao?idPedido=${idPedido}` },
+    { nome: "GET /expedicao?pedido=", url: `https://api.tiny.com.br/public-api/v3/expedicao?pedido=${idPedido}` },
+    { nome: "GET /expedicao (lista)", url: `https://api.tiny.com.br/public-api/v3/expedicao` }
+  ];
+
+  const resultados = [];
+  for (const t of tentativas) {
+    try {
+      const resp = await fetch(t.url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      const rawText = await resp.text();
+      let data = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        data = rawText.slice(0, 300);
+      }
+      resultados.push({ tentativa: t.nome, url: t.url, status: resp.status, resposta: data });
+    } catch (err) {
+      resultados.push({ tentativa: t.nome, url: t.url, erro: String(err) });
+    }
+  }
+  return jsonResponse(200, { resultados });
 }
 
 function jsonResponse(statusCode, obj) {
