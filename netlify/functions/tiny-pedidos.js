@@ -216,6 +216,7 @@ async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
   let offset = 0;
   const PAGE_SIZE = 100;
   let encontrado = null;
+  let encontradoResumoLista = null;
 
   while (offset < 500) {
     const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
@@ -249,6 +250,7 @@ async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
         String(num) === String(numeroPedidoBuscado)
       ) {
         encontrado = pedido;
+        encontradoResumoLista = p;
         break;
       }
     }
@@ -261,7 +263,7 @@ async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
       error: `Pedido com número "${numeroPedidoBuscado}" não encontrado nos últimos 10 dias.`
     });
   }
-  return jsonResponse(200, { pedidoCru: encontrado });
+  return jsonResponse(200, { pedidoCru: encontrado, resumoListaCru: encontradoResumoLista });
 }
 
 function jsonResponse(statusCode, obj) {
