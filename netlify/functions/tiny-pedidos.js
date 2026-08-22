@@ -38,6 +38,14 @@ exports.handler = async (event) => {
   }
 
   const params = event.queryStringParameters || {};
+
+  // MODO DIAGNÓSTICO TEMPORÁRIO: devolve o pedido exatamente como o Tiny manda,
+  // sem nenhum filtro/mapeamento nosso. Use ?rawNumeroPedido=<número do pedido
+  // do canal, ex: 2608221K4YHXJ2> pra descobrir os nomes reais dos campos.
+  // Remover depois de resolver o mapeamento de dataPrevista/sku de kits.
+  if (params.rawNumeroPedido) {
+    return await diagnosticoRaw(params.rawNumeroPedido, accessToken);
+  }
   const hoje = hojeBrasil();
   const dataInicial = params.dataInicial || diasAtrasBrasil(2);
   const dataFinal = params.dataFinal || hoje;
@@ -198,6 +206,62 @@ async function fetchComRetry(url, accessToken, tentativa) {
   }
 
   return { data };
+}
+
+async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
+  // Procura nos últimos 10 dias o pedido com esse número (do canal), pega o ID
+  // interno do Tiny, e devolve o detalhe cru desse pedido — sem nenhum filtro.
+  const hoje = hojeBrasil();
+  const dataInicial = diasAtrasBrasil(10);
+  let offset = 0;
+  const PAGE_SIZE = 100;
+  let encontrado = null;
+
+  while (offset < 500) {
+    const listUrl = new URL("https://api.tiny.com.br/public-api/v3/pedidos");
+    listUrl.searchParams.set("dataInicial", dataInicial);
+    listUrl.searchParams.set("dataFinal", hoje);
+    listUrl.searchParams.set("limit", String(PAGE_SIZE));
+    listUrl.searchParams.set("offset", String(offset));
+
+    const listResult = await fetchComRetry(listUrl.toString(), accessToken);
+    if (listResult.erroFatal) {
+      return jsonResponse(listResult.status || 500, {
+        error: listResult.error,
+        detail: listResult.detail
+      });
+    }
+    const pagina = listResult.data.itens || [];
+    if (!pagina.length) break;
+
+    for (const p of pagina) {
+      const detResult = await fetchComRetry(
+        `https://api.tiny.com.br/public-api/v3/pedidos/${p.id}`,
+        accessToken
+      );
+      if (detResult.erroFatal) continue;
+      const pedido = detResult.data;
+      const numEcom =
+        (pedido.ecommerce && pedido.ecommerce.numeroPedidoEcommerce) || "";
+      const num = pedido.numeroPedido || "";
+      if (
+        String(numEcom) === String(numeroPedidoBuscado) ||
+        String(num) === String(numeroPedidoBuscado)
+      ) {
+        encontrado = pedido;
+        break;
+      }
+    }
+    if (encontrado) break;
+    offset += PAGE_SIZE;
+  }
+
+  if (!encontrado) {
+    return jsonResponse(404, {
+      error: `Pedido com número "${numeroPedidoBuscado}" não encontrado nos últimos 10 dias.`
+    });
+  }
+  return jsonResponse(200, { pedidoCru: encontrado });
 }
 
 function jsonResponse(statusCode, obj) {
