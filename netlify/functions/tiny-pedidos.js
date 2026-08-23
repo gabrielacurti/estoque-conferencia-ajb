@@ -53,6 +53,12 @@ exports.handler = async (event) => {
   if (params.rawExpedicaoIdPedido) {
     return await diagnosticoExpedicao(params.rawExpedicaoIdPedido, accessToken);
   }
+
+  // MODO DIAGNÓSTICO TEMPORÁRIO 3: testa a API de Anúncios, pra ver se ela tem
+  // foto do produto. Use ?rawAnuncios=1 (lista os primeiros anúncios, sem filtro).
+  if (params.rawAnuncios) {
+    return await diagnosticoAnuncios(accessToken);
+  }
   const hoje = hojeBrasil();
   const dataInicial = params.dataInicial || diasAtrasBrasil(2);
   const dataFinal = params.dataFinal || hoje;
@@ -145,6 +151,20 @@ exports.handler = async (event) => {
         if (!skuFinal && item.produto && item.produto.id) {
           skuFinal = `TINY-${item.produto.id}`;
         }
+        // Data de despacho: usamos a do Tiny quando ele tem (comum no Mercado
+        // Livre); quando não tem (comum na Shopee), calculamos uma estimativa
+        // conservadora com base no dia do pedido — sempre a data MAIS CEDO
+        // possível dentro da regra combinada, pra nunca dar a impressão de que
+        // sobra mais tempo do que realmente sobra. Como a API do Tiny só dá o
+        // dia (sem hora), não dá pra saber com certeza se foi antes/depois do
+        // horário de corte — por isso "estimado" pode, às vezes, mostrar uma
+        // data um pouco mais cedo do que a real (nunca mais tarde).
+        let dataDespacho = pedido.dataPrevista || "";
+        let despachoOrigem = dataDespacho ? "tiny" : "";
+        if (!dataDespacho) {
+          dataDespacho = estimarDespachoConservador(pedido.data);
+          despachoOrigem = dataDespacho ? "estimado" : "";
+        }
         linhas.push({
           sku: skuFinal,
           descricao: item.produto ? item.produto.descricao : "",
@@ -152,7 +172,10 @@ exports.handler = async (event) => {
           valorUnitario: item.valorUnitario,
           numeroPedido: numeroPedido,
           canal: canal,
-          dataPrevista: pedido.dataPrevista || ""
+          dataPedido: pedido.data || "",
+          dataPrevista: pedido.dataPrevista || "",
+          dataDespacho: dataDespacho,
+          despachoOrigem: despachoOrigem
         });
       });
     });
@@ -282,6 +305,31 @@ async function diagnosticoRaw(numeroPedidoBuscado, accessToken) {
   return jsonResponse(200, { pedidoCru: encontrado, resumoListaCru: encontradoResumoLista });
 }
 
+async function diagnosticoAnuncios(accessToken) {
+  const tentativas = [
+    { nome: "GET /anuncios", url: `https://api.tiny.com.br/public-api/v3/anuncios?limit=3` },
+    { nome: "GET /anuncio", url: `https://api.tiny.com.br/public-api/v3/anuncio?limit=3` },
+    { nome: "GET /ecommerce/anuncios", url: `https://api.tiny.com.br/public-api/v3/ecommerce/anuncios?limit=3` }
+  ];
+  const resultados = [];
+  for (const t of tentativas) {
+    try {
+      const resp = await fetch(t.url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      const rawText = await resp.text();
+      let data = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        data = rawText.slice(0, 300);
+      }
+      resultados.push({ tentativa: t.nome, url: t.url, status: resp.status, resposta: data });
+    } catch (err) {
+      resultados.push({ tentativa: t.nome, url: t.url, erro: String(err) });
+    }
+  }
+  return jsonResponse(200, { resultados });
+}
+
 async function diagnosticoExpedicao(idPedido, accessToken) {
   // Tenta várias formas plausíveis de consultar a API de Expedição de uma vez,
   // já que a documentação pública não deixa claro o formato exato.
@@ -309,6 +357,31 @@ async function diagnosticoExpedicao(idPedido, accessToken) {
     }
   }
   return jsonResponse(200, { resultados });
+}
+
+// Estimativa CONSERVADORA de despacho quando o Tiny não devolve a data real
+// (comum na Shopee). Regra combinada que Gabi passou:
+// - Terça a sexta: venda até 13h despacha no mesmo dia; depois das 13h, no dia seguinte.
+// - Sexta depois das 13h, sábado, domingo e segunda até 8h: despacham na segunda.
+// - Segunda das 8h em diante (antes ou depois das 13h): despacha na terça.
+// Como a API só dá o DIA do pedido (sem hora), não dá pra saber se foi antes
+// ou depois do horário de corte. Por segurança ("nunca perder prazo"), sempre
+// assumimos o cenário mais cedo possível dentro da regra:
+// - Segunda a sexta: assume que foi antes do corte → despacha no mesmo dia.
+// - Sábado ou domingo: só existe uma opção na regra → despacha na segunda seguinte.
+function estimarDespachoConservador(dataPedidoStr) {
+  if (!dataPedidoStr || !/^\d{4}-\d{2}-\d{2}$/.test(dataPedidoStr)) return "";
+  const [y, m, d] = dataPedidoStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const diaSemana = dt.getUTCDay(); // 0=domingo, 1=segunda, ..., 6=sábado
+
+  if (diaSemana === 0) {
+    dt.setUTCDate(dt.getUTCDate() + 1); // domingo -> segunda
+  } else if (diaSemana === 6) {
+    dt.setUTCDate(dt.getUTCDate() + 2); // sábado -> segunda
+  }
+  // segunda a sexta: mantém o mesmo dia (cenário mais cedo possível)
+  return dt.toISOString().slice(0, 10);
 }
 
 function jsonResponse(statusCode, obj) {
