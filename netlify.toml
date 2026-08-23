@@ -23,3 +23,13 @@
   from = "/api/tiny-estoque"
   to = "/.netlify/functions/tiny-estoque"
   status = 200
+
+[[redirects]]
+  from = "/api/tiny-historico"
+  to = "/.netlify/functions/tiny-historico"
+  status = 200
+
+# Roda sozinha todo dia às 11:00 UTC = 08:00 horário de Brasília (sem horário
+# de verão). Busca os pedidos do dia e salva no histórico permanente.
+[functions."tiny-pedidos-cron"]
+  schedule = "0 11 * * *"

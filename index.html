@@ -435,12 +435,16 @@
       <h2>1. Importar saldo do Tiny</h2>
       <div class="hint">O saldo em estoque do Tiny é buscado automaticamente, cruzando cada produto vendido hoje com o saldo dele.</div>
 
+      <button class="btn btn-primary btn-block" id="btnBuscarTinySaldo" style="margin-top:10px; margin-bottom:8px;">🔄 Buscar saldo do Tiny automaticamente e cruzar</button>
+      <div class="small-note" id="tinySaldoStatusNote" style="margin-bottom:10px;"></div>
+      <div class="small-note" style="margin-bottom:10px;">Precisa confirmar os pedidos do dia (passo 2, mais abaixo) antes de clicar aqui.</div>
+
       <div class="dropzone hidden" id="dzTiny">
         <div class="icon">📄</div>
         <div class="txt"><b>Toque para escolher o arquivo</b><br>CSV ou XLSX exportado do Tiny</div>
         <input type="file" id="fileTiny" accept=".csv,.xlsx,.xls">
       </div>
-      <div class="small-note">O saldo é buscado automaticamente na etapa de baixo, depois de confirmar os pedidos (botão "🔄 Buscar saldo do Tiny automaticamente e cruzar").</div>
+      <div class="small-note">Alternativa manual: pode importar uma planilha de saldo em vez de usar o botão acima.</div>
 
       <div id="mapTinyArea" class="hidden" style="margin-top:16px;">
         <div class="field">
@@ -472,6 +476,19 @@
       <button class="btn btn-primary btn-block" id="btnBuscarTinyPedidos" style="margin-top:10px;">🔄 Buscar pedidos de hoje do Tiny (automático)</button>
       <div class="small-note" id="tinyPedidosStatusNote" style="margin-top:6px; margin-bottom:6px;"></div>
       <div class="small-note" style="margin-bottom:10px;">Isso já preenche os dois canais abaixo sozinho.</div>
+
+      <button type="button" class="btn btn-ghost btn-block" id="btnAbrirHistorico" style="margin-bottom:10px;">📅 Ver histórico de dias anteriores</button>
+      <div id="painelHistorico" class="hidden" style="border:1px solid #ddd; border-radius:8px; padding:10px; margin-bottom:14px;">
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+          <label for="historicoDataInicial" style="font-size:13px;">De</label>
+          <input type="date" id="historicoDataInicial" style="flex:1;">
+          <label for="historicoDataFinal" style="font-size:13px;">até</label>
+          <input type="date" id="historicoDataFinal" style="flex:1;">
+          <button type="button" class="btn btn-ghost" id="btnBuscarHistorico">Buscar</button>
+        </div>
+        <div class="small-note" id="historicoStatusNote"></div>
+        <div id="historicoLista"></div>
+      </div>
 
       <div style="display:flex; gap:8px; margin-top:10px;">
         <button type="button" class="step-pill active" id="chTabMl" style="cursor:pointer; border:none;">Mercado Livre</button>
@@ -559,10 +576,6 @@
       <div class="small-note" style="margin-top:12px;">Se o mesmo SKU aparecer em vários pedidos (do mesmo canal ou dos dois juntos), o app soma tudo automaticamente e junta os números dos pedidos na mesma linha, marcando de qual canal veio cada um.</div>
       <button class="btn btn-primary btn-block" id="confirmPedidos" style="margin-top:10px;">Confirmar pedidos</button>
     </div>
-
-    <button class="btn btn-primary btn-block" id="btnBuscarTinySaldo" style="margin-bottom:8px;">🔄 Buscar saldo do Tiny automaticamente e cruzar</button>
-    <div class="small-note" id="tinySaldoStatusNote" style="margin-bottom:10px;"></div>
-    <div class="small-note" style="margin-bottom:10px;">Precisa confirmar os pedidos acima primeiro. Se preferir, ainda dá pra usar a planilha de saldo importada em "1. Importar saldo do Tiny".</div>
 
     <button class="btn btn-primary btn-block" id="confirmTiny" style="margin-bottom:16px;">Cruzar e iniciar contagem</button>
 
@@ -1169,7 +1182,7 @@
           noteEl.textContent = "Nenhum pedido encontrado hoje no Tiny.";
           return;
         }
-        const headers = ["SKU","Descrição","Quantidade","Número do Pedido","Data Máxima de Despacho","Valor de Venda (Tiny)"];
+        const headers = ["SKU","Descrição","Quantidade","Número do Pedido","Data Prevista (Tiny, quando disponível)","Valor de Venda (Tiny)"];
         const mlRows = [];
         const shRows = [];
         linhas.forEach(l => {
@@ -1192,6 +1205,102 @@
         btnBuscarTinyPedidos.disabled = false;
       }
     });
+  }
+
+  // ---------- Histórico permanente (busca automática diária + reabrir) ----------
+  const btnAbrirHistorico = el("btnAbrirHistorico");
+  const painelHistorico = el("painelHistorico");
+  const btnBuscarHistorico = el("btnBuscarHistorico");
+  if(btnAbrirHistorico && painelHistorico){
+    btnAbrirHistorico.addEventListener("click", () => {
+      painelHistorico.classList.toggle("hidden");
+      if(!painelHistorico.classList.contains("hidden")){
+        const hoje = new Date().toISOString().slice(0,10);
+        const inicialEl = el("historicoDataInicial");
+        const finalEl = el("historicoDataFinal");
+        if(inicialEl && !inicialEl.value) inicialEl.value = hoje;
+        if(finalEl && !finalEl.value) finalEl.value = hoje;
+      }
+    });
+  }
+  async function marcarReaberto(data, chaveItem, reaberto){
+    try{
+      const resp = await fetch("/api/tiny-historico", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({data, chaveItem, reaberto})
+      });
+      if(!resp.ok){
+        alert("Não consegui atualizar o item agora. Tenta de novo.");
+        return false;
+      }
+      return true;
+    }catch(err){
+      console.error("Erro ao marcar reaberto", err);
+      alert("Erro de conexão ao tentar reabrir/fechar o item.");
+      return false;
+    }
+  }
+  function renderHistorico(dias){
+    const container = el("historicoLista");
+    if(!container) return;
+    if(!dias || !dias.length){
+      container.innerHTML = "<div class=\"small-note\">Nenhum histórico salvo pra esse período ainda. A busca automática roda uma vez por dia — se acabou de configurar, pode ser que ainda não tenha rodado.</div>";
+      return;
+    }
+    const partes = [];
+    dias.sort((a,b) => (a.data < b.data ? 1 : -1)).forEach(dia => {
+      const itens = Object.entries(dia.pedidos || {});
+      partes.push(`<div style="margin-top:10px;"><strong>${escapeHtml(dia.data)}</strong> — ${itens.length} item(ns)</div>`);
+      itens.sort((a,b) => (a[1].numeroPedido||"").localeCompare(b[1].numeroPedido||"")).forEach(([chaveItem, item]) => {
+        const reaberto = !!item.reaberto;
+        partes.push(`
+          <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #eee; padding:6px 0; font-size:13px;">
+            <div>
+              <div>${escapeHtml(item.descricao || item.sku || "")} ${reaberto ? "<span style=\"color:#c0392b; font-weight:600;\">(reaberto)</span>" : ""}</div>
+              <div class="small-note">SKU ${escapeHtml(item.sku||"")} · Qtd ${escapeHtml(String(item.quantidade||""))} · Pedido ${escapeHtml(item.numeroPedido||"")} · ${escapeHtml(item.canal||"")} · Despacho ${escapeHtml(item.dataDespacho||"—")}${item.despachoOrigem === "estimado" ? " (estimado)" : ""}</div>
+            </div>
+            <button type="button" class="btn btn-ghost btn-reabrir" data-dia="${escapeHtml(dia.data)}" data-chave="${escapeHtml(chaveItem)}" data-reaberto="${reaberto ? "1" : "0"}">${reaberto ? "Fechar" : "Reabrir"}</button>
+          </div>
+        `);
+      });
+    });
+    container.innerHTML = partes.join("");
+    container.querySelectorAll(".btn-reabrir").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const dia = btn.getAttribute("data-dia");
+        const chave = btn.getAttribute("data-chave");
+        const estavaReaberto = btn.getAttribute("data-reaberto") === "1";
+        btn.disabled = true;
+        const ok = await marcarReaberto(dia, chave, !estavaReaberto);
+        btn.disabled = false;
+        if(ok) buscarHistorico();
+      });
+    });
+  }
+  async function buscarHistorico(){
+    const statusEl = el("historicoStatusNote");
+    const inicialEl = el("historicoDataInicial");
+    const finalEl = el("historicoDataFinal");
+    if(!inicialEl || !finalEl || !inicialEl.value || !finalEl.value) return;
+    statusEl.textContent = "Buscando histórico...";
+    try{
+      const url = `/api/tiny-historico?dataInicial=${encodeURIComponent(inicialEl.value)}&dataFinal=${encodeURIComponent(finalEl.value)}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if(!resp.ok){
+        statusEl.textContent = "Erro ao buscar histórico: " + (data.error || resp.status);
+        return;
+      }
+      statusEl.textContent = "";
+      renderHistorico(data.dias);
+    }catch(err){
+      console.error("Erro ao buscar histórico", err);
+      statusEl.textContent = "Erro de conexão ao buscar histórico.";
+    }
+  }
+  if(btnBuscarHistorico){
+    btnBuscarHistorico.addEventListener("click", buscarHistorico);
   }
 
   function renderDispatchSplitNote(parsed, mapDespachoEl, mapSkuEl, mapQtdEl, noteEl, includesFuture){
@@ -1563,8 +1672,7 @@
         mapTinyFoto.value = "3"; // coluna "Foto" (índice 3) — a foto vem pronta da API
         updateTinyPreview();
         const naoEncontrados = resultados.length - encontrados.length;
-        noteEl.textContent = `Pronto! ${encontrados.length} SKU(s) encontrado(s).${naoEncontrados ? ` ${naoEncontrados} não encontrado(s) no Tiny.` : ""} Cruzando...`;
-        doCruzar();
+        noteEl.textContent = `Pronto! ${encontrados.length} SKU(s) encontrado(s).${naoEncontrados ? ` ${naoEncontrados} não encontrado(s) no Tiny.` : ""} Agora é só clicar em "Cruzar e iniciar contagem" quando quiser.`;
       }catch(err){
         console.error("Erro ao buscar saldo do Tiny", err);
         noteEl.textContent = "Erro ao buscar saldo: " + err.message;
